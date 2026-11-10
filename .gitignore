@@ -1,0 +1,11 @@
+c:\Users\Shivam\Desktop\campussarthi\backend\node_modules
+c:\Users\Shivam\Desktop\campussarthi\frontend\node_modules
+c:\Users\Shivam\Desktop\campussarthi\backend\dist
+*.env
+*.log
+.DS_Store
+tmp/
+/tmp/campussarthi/
+
+node_modules
+dist/
