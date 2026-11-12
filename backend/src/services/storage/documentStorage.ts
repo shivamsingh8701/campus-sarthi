@@ -4,6 +4,7 @@
 // ============================================================
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { getAdminClient } from '../../db/supabase';
@@ -11,8 +12,11 @@ import { logger } from '../../utils/logger';
 
 export const STORAGE_BUCKET = 'campus-documents';
 
-// Use a persistent directory inside the backend root (survives temp cleanup)
-const BASE_STORAGE_DIR = path.resolve(process.cwd(), 'storage', 'documents');
+// Use /tmp in Vercel serverless (read-only deployment bundle); persistent dir elsewhere
+const IS_VERCEL = process.env['VERCEL'] === '1';
+const BASE_STORAGE_DIR = IS_VERCEL
+  ? path.join(os.tmpdir(), 'campussarthi', 'documents')
+  : path.resolve(process.cwd(), 'storage', 'documents');
 
 function ensureDir(dir: string): void {
   fs.mkdirSync(dir, { recursive: true });

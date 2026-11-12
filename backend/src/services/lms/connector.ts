@@ -127,14 +127,35 @@ export class LMSConnector {
 
   async launch(): Promise<void> {
     logger.info('Launching LMS browser');
+    let executablePath = process.env['CHROMIUM_EXECUTABLE_PATH'] || undefined;
+    let launchArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+    ];
+    let headless = this.headless;
+
+    if (!executablePath && process.env['VERCEL'] === '1') {
+      try {
+        // Optional serverless Chromium binary when deployed on Vercel
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const sparticuz = require('@sparticuz/chromium') as {
+          executablePath: () => Promise<string>;
+          args: string[];
+        };
+        executablePath = await sparticuz.executablePath();
+        launchArgs = [...sparticuz.args, '--disable-blink-features=AutomationControlled'];
+        headless = true;
+      } catch {
+        logger.warn('VERCEL=1 detected without @sparticuz/chromium or CHROMIUM_EXECUTABLE_PATH; falling back to default Playwright Chromium');
+      }
+    }
+
     this.browser = await chromium.launch({
-      headless: this.headless,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-      ],
+      headless,
+      executablePath,
+      args: launchArgs,
     });
 
     this.context = await this.browser.newContext({

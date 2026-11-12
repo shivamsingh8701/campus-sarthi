@@ -9,6 +9,11 @@ import { logger } from './utils/logger';
 import { SyncJob } from './services/scheduler/syncJob';
 
 async function main(): Promise<void> {
+  if (process.env['VERCEL'] === '1') {
+    logger.info('Running in Vercel serverless environment; skipping app.listen and node-cron.');
+    return;
+  }
+
   // Validate config early — throws if required env vars are missing
   const cfg = getConfig();
 

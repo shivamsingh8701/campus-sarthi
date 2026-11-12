@@ -24,6 +24,7 @@ import emailRoutes from './routes/email';
 import activityRoutes from './routes/activity';
 import integrationsRoutes from './routes/integrations';
 import aiRoutes from './routes/ai';
+import { SyncJob } from './services/scheduler/syncJob';
 
 export function createApp(): express.Application {
   const cfg = getConfig();
@@ -80,12 +81,30 @@ export function createApp(): express.Application {
   );
 
   // ── Health check (no rate limit) ──────────────────────────
-  app.get('/health', (_req, res) => {
+  const healthHandler = (_req: express.Request, res: express.Response) => {
     res.json({
       status: 'ok',
       env: cfg.nodeEnv,
       timestamp: new Date().toISOString(),
     });
+  };
+  app.get('/health', healthHandler);
+  app.get('/api/health', healthHandler);
+
+  // ── Vercel Cron Sync Endpoint (protected by CRON_SECRET) ──
+  app.get('/api/v1/cron/sync', async (req, res) => {
+    const cronSecret = process.env['CRON_SECRET'];
+    if (!cronSecret) {
+      res.status(503).json({ error: 'CRON_SECRET is not configured.' });
+      return;
+    }
+    const authHeader = req.headers.authorization || '';
+    if (authHeader !== `Bearer ${cronSecret}`) {
+      res.status(401).json({ error: 'Unauthorized cron invocation.' });
+      return;
+    }
+    await SyncJob.getInstance().runSyncForAllStudents();
+    res.json({ ok: true, timestamp: new Date().toISOString() });
   });
 
   // ── API Routes ─────────────────────────────────────────────

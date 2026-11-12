@@ -9,5 +9,6 @@ tmp/
 
 node_modules
 dist/
+.vercel
 backend/storage/documents/
 backend/storage/pipeline_state.json
