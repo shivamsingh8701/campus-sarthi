@@ -1,5 +1,7 @@
 // ============================================================
-// CampusSarthi — PDF Solution Generator (PDFKit)
+// CampusSarthi — Academic A4 Solution PDF Generator (PDFKit)
+// Clean typography, honest AI disclaimer, proper page breaks,
+// no fake university seals or signatures.
 // ============================================================
 
 import path from 'path';
@@ -9,38 +11,40 @@ import { randomUUID } from 'crypto';
 import { logger } from '../../utils/logger';
 import type { SolutionPdfData } from '../../types';
 
-const OUTPUT_DIR = path.join(os.tmpdir(), 'campuspilot', 'docs');
+const FALLBACK_DIR = path.join(os.tmpdir(), 'campussarthi', 'docs');
 
-function ensureOutputDir(): void {
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-}
-
-// Pad single digit numbers
 function pad2(n: number): string {
   return n.toString().padStart(2, '0');
 }
 
-function formatDate(d: Date | null): string {
-  if (!d) return 'N/A';
-  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
+function formatDateTime(d: Date | null): string {
+  if (!d) return 'Not specified';
+  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+export function buildSolutionPdfFilename(courseName: string, assignmentTitle: string): string {
+  const courseCodeMatch = courseName.match(/^([A-Z0-9-]{3,14})/i);
+  const coursePart = courseCodeMatch ? courseCodeMatch[1]! : courseName;
+  const cleanCourse = coursePart.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 20);
+  const cleanTitle = assignmentTitle.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48);
+  const parts = ['CampusSarthi', cleanCourse, cleanTitle, 'Solution'].filter(Boolean);
+  return `${parts.join('_')}.pdf`;
 }
 
 export class PdfGenerator {
   /**
-   * Generate a professionally formatted solution PDF.
-   * Returns the absolute path to the generated file.
+   * Generate a clean A4 academic solution PDF and return both Buffer and suggested filename.
    */
-  async generateSolutionPdf(data: SolutionPdfData): Promise<string> {
-    ensureOutputDir();
-
-    const filename = `solution-${randomUUID()}.pdf`;
-    const filePath = path.join(OUTPUT_DIR, filename);
-
-    logger.info('Generating solution PDF', {
+  async generateSolutionPdfBuffer(data: SolutionPdfData): Promise<{
+    buffer: Buffer;
+    filename: string;
+  }> {
+    logger.info('Generating A4 solution PDF buffer', {
       assignmentTitle: data.assignmentTitle,
       questions: data.questions.length,
-      filePath,
     });
+
+    const suggestedFilename = buildSolutionPdfFilename(data.courseName, data.assignmentTitle);
 
     return new Promise((resolve, reject) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -49,259 +53,350 @@ export class PdfGenerator {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         PDFDocument = require('pdfkit') as new (options?: Record<string, unknown>) => any;
       } catch {
-        return reject(
-          new Error('pdfkit is not installed. Run: npm install pdfkit @types/pdfkit')
-        );
+        return reject(new Error('pdfkit is not installed. Run: npm install pdfkit @types/pdfkit'));
       }
 
-      const doc = new PDFDocument({ margin: 50, size: 'A4', bufferPages: true });
-      const stream = fs.createWriteStream(filePath);
+      const doc = new PDFDocument({
+        margin: 50,
+        size: 'A4',
+        bufferPages: true,
+        info: {
+          Title: `CampusSarthi AI — ${data.assignmentTitle}`,
+          Author: 'CampusSarthi Academic Assistant',
+          Subject: data.courseName,
+        },
+      });
 
-      doc.pipe(stream);
+      const chunks: Buffer[] = [];
+      doc.on('data', (c: Buffer) => chunks.push(c));
+      doc.on('error', (err: Error) => reject(err));
+      doc.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        logger.info('Solution PDF buffer generated', {
+          filename: suggestedFilename,
+          sizeBytes: buffer.length,
+        });
+        resolve({ buffer, filename: suggestedFilename });
+      });
 
-      // ── Color Palette ────────────────────────────────────
       const COLOR = {
-        primary: '#1a237e',    // Dark blue
-        accent: '#e53935',     // Red for disclaimers
-        muted: '#757575',      // Gray for metadata
-        black: '#212121',
-        lightGray: '#f5f5f5',
-        border: '#e0e0e0',
+        navy: '#1e3a8a',
+        ink: '#0f172a',
+        body: '#1e293b',
+        muted: '#475569',
+        subtle: '#64748b',
+        accentGreen: '#166534',
+        amberBg: '#fffbeb',
+        amberBorder: '#f59e0b',
+        amberText: '#92400e',
+        softBg: '#f8fafc',
+        border: '#cbd5e1',
       };
 
-      const PAGE_WIDTH = doc.page.width;
-      const MARGIN = 50;
-      const CONTENT_WIDTH = PAGE_WIDTH - MARGIN * 2;
+      const PAGE_W = doc.page.width;
+      const PAGE_H = doc.page.height;
+      const M = 50;
+      const CW = PAGE_W - M * 2;
+      const BOTTOM_LIMIT = PAGE_H - 65;
 
-      // ── Header ────────────────────────────────────────────
-      // Brand bar
-      doc.rect(MARGIN, 40, CONTENT_WIDTH, 4).fill(COLOR.primary);
+      const ensureSpace = (neededHeight: number) => {
+        if (doc.y + neededHeight > BOTTOM_LIMIT) {
+          doc.addPage();
+          doc.y = 58;
+        }
+      };
+
+      // ── Cover / Title Header ─────────────────────────────────────────────
+      doc.rect(M, 38, CW, 4).fill(COLOR.navy);
 
       doc
-        .fontSize(20)
-        .fillColor(COLOR.primary)
+        .fontSize(17)
+        .fillColor(COLOR.navy)
         .font('Helvetica-Bold')
-        .text('CAMPUSPILOT AI — ASSIGNMENT SOLUTION', MARGIN, 54, { width: CONTENT_WIDTH });
-
-      doc
-        .fontSize(11)
-        .fillColor(COLOR.muted)
-        .font('Helvetica')
-        .text('Automated Academic Assistant · Galgotias University LMS', MARGIN, 80, {
-          width: CONTENT_WIDTH,
-        });
-
-      doc.moveDown(1.5);
-
-      // Divider
-      doc.rect(MARGIN, doc.y, CONTENT_WIDTH, 1).fill(COLOR.border);
-      doc.moveDown(1);
-
-      // ── Disclaimer Box ────────────────────────────────────
-      const disclaimerTop = doc.y;
-      doc.rect(MARGIN, disclaimerTop, CONTENT_WIDTH, 50).fill('#fff8e1');
+        .text('CAMPUSSARTHI AI — ASSIGNMENT SOLUTION', M, 50, { width: CW });
 
       doc
         .fontSize(9.5)
-        .fillColor(COLOR.accent)
-        .font('Helvetica-Bold')
-        .text(
-          '⚠  AI-PREPARED DRAFT — FOR STUDENT REVIEW ONLY. Do not submit without reviewing and verifying.',
-          MARGIN + 10,
-          disclaimerTop + 10,
-          { width: CONTENT_WIDTH - 20, align: 'center' }
-        );
-
-      doc
-        .fontSize(8)
-        .fillColor(COLOR.muted)
+        .fillColor(COLOR.subtle)
         .font('Helvetica')
-        .text(
-          data.aiDisclaimer,
-          MARGIN + 10,
-          disclaimerTop + 28,
-          { width: CONTENT_WIDTH - 20, align: 'center' }
-        );
+        .text('Structured Academic Study Draft · Automated Coursework Assistant', M, 73, { width: CW });
 
-      doc.y = disclaimerTop + 60;
-      doc.moveDown(1);
+      doc.y = 92;
+      doc.rect(M, doc.y, CW, 0.8).fill(COLOR.border);
+      doc.y += 12;
 
-      // ── Assignment Metadata ───────────────────────────────
-      doc
-        .fontSize(16)
-        .fillColor(COLOR.black)
-        .font('Helvetica-Bold')
-        .text(data.assignmentTitle, MARGIN, doc.y, { width: CONTENT_WIDTH });
-
-      doc.moveDown(0.5);
-
-      const metaItems = [
-        { label: 'Student name', value: data.studentName || 'Student' },
-        { label: 'Course', value: data.courseName },
-        { label: 'Assignment title', value: data.assignmentTitle },
-        { label: 'Due date', value: formatDate(data.dueDate) },
-        { label: 'Generated', value: formatDate(data.generatedAt) },
+      // ── Academic Metadata Card ───────────────────────────────────────────
+      const metaRows: Array<[string, string]> = [
+        ['Assignment', data.assignmentTitle],
+        ['Course', data.courseName],
+        ['Student', data.admissionNumber ? `${data.studentName} (${data.admissionNumber})` : data.studentName || 'Student'],
+        ['Deadline', formatDateTime(data.dueDate)],
+        ['Generated At', formatDateTime(data.generatedAt)],
       ];
-
-      for (const item of metaItems) {
-        doc
-          .fontSize(10)
-          .font('Helvetica-Bold')
-          .fillColor(COLOR.muted)
-          .text(`${item.label}: `, MARGIN, doc.y, { continued: true })
-          .font('Helvetica')
-          .fillColor(COLOR.black)
-          .text(item.value);
+      if (data.sourceFilename) {
+        metaRows.push([
+          'Source Document',
+          data.sourcePageCount ? `${data.sourceFilename} (${data.sourcePageCount} page${data.sourcePageCount === 1 ? '' : 's'})` : data.sourceFilename,
+        ]);
+      }
+      if (data.aiProviderUsed) {
+        metaRows.push(['AI Engine', data.aiProviderUsed]);
       }
 
-      doc.moveDown(1.5);
+      const cardTop = doc.y;
+      const cardHeight = metaRows.length * 17 + 14;
+      doc.roundedRect(M, cardTop, CW, cardHeight, 4).fillAndStroke(COLOR.softBg, COLOR.border);
 
-      // ── Table of Contents ─────────────────────────────────
-      doc.rect(MARGIN, doc.y, CONTENT_WIDTH, 1).fill(COLOR.border);
-      doc.moveDown(0.5);
+      let metaY = cardTop + 9;
+      for (const [label, val] of metaRows) {
+        doc
+          .fontSize(9)
+          .font('Helvetica-Bold')
+          .fillColor(COLOR.muted)
+          .text(`${label}:`, M + 12, metaY, { width: 95, lineBreak: false });
+        doc
+          .fontSize(9)
+          .font('Helvetica')
+          .fillColor(COLOR.ink)
+          .text(val, M + 108, metaY, { width: CW - 120, lineBreak: false, ellipsis: true });
+        metaY += 17;
+      }
 
+      doc.y = cardTop + cardHeight + 12;
+
+      // ── Mandatory Academic Integrity Disclaimer ──────────────────────────
+      const disclaimerText =
+        data.aiDisclaimer ||
+        'AI-prepared academic draft. Please review and verify before academic submission.';
+      const discH = Math.max(36, doc.heightOfString(disclaimerText, { width: CW - 24 }) + 16);
+      doc.roundedRect(M, doc.y, CW, discH, 4).fillAndStroke(COLOR.amberBg, COLOR.amberBorder);
       doc
-        .fontSize(13)
-        .fillColor(COLOR.primary)
+        .fontSize(8.5)
         .font('Helvetica-Bold')
-        .text('Questions Summary', MARGIN);
-      doc.moveDown(0.5);
+        .fillColor(COLOR.amberText)
+        .text(disclaimerText, M + 12, doc.y + 9, { width: CW - 24 });
+      doc.y += discH + 14;
 
-      data.questions.forEach((q, idx) => {
-        const shortQ =
-          q.question.length > 90 ? q.question.slice(0, 87) + '...' : q.question;
+      // ── Executive Topic Summary (if present) ─────────────────────────────
+      if (data.summary && data.summary.trim()) {
+        const sumH = doc.heightOfString(data.summary, { width: CW }) + 26;
+        ensureSpace(sumH);
+        doc
+          .fontSize(11)
+          .font('Helvetica-Bold')
+          .fillColor(COLOR.navy)
+          .text('Overview & Key Concepts', M, doc.y);
+        doc.moveDown(0.35);
         doc
           .fontSize(9.5)
           .font('Helvetica')
-          .fillColor(COLOR.black)
-          .text(`${idx + 1}. ${shortQ}`, MARGIN + 10, doc.y, {
-            width: CONTENT_WIDTH - 10,
-          });
-      });
+          .fillColor(COLOR.body)
+          .text(data.summary.trim(), M, doc.y, { width: CW, lineGap: 2 });
+        doc.moveDown(1);
+      }
 
-      doc.addPage();
-
-      // ── Individual Questions & Answers ────────────────────
-      data.questions.forEach((qa, idx) => {
-        // Check if we need a new page (rough estimate)
-        const spaceNeeded = 80 + (qa.answer.length / 80) * 14 + (qa.reasoning ? 60 : 0);
-        if (doc.y + spaceNeeded > doc.page.height - 80) {
-          doc.addPage();
-        }
-
-        // Question header bar
-        doc
-          .rect(MARGIN, doc.y, CONTENT_WIDTH, 24)
-          .fill(COLOR.primary);
-
+      // ── Table of Contents (shown when >= 4 questions) ────────────────────
+      if (data.questions.length >= 4) {
+        ensureSpace(40 + Math.min(data.questions.length, 8) * 18);
         doc
           .fontSize(11)
-          .fillColor('white')
           .font('Helvetica-Bold')
-          .text(`Q${idx + 1}`, MARGIN + 8, doc.y - 18, { continued: true })
-          .font('Helvetica')
-          .text(` — ${qa.question.slice(0, 80)}${qa.question.length > 80 ? '...' : ''}`, {
-            width: CONTENT_WIDTH - 60,
-          });
+          .fillColor(COLOR.navy)
+          .text('Table of Contents', M, doc.y);
+        doc.moveDown(0.4);
 
-        doc.y += 10;
-        doc.fillColor(COLOR.black);
-
-        // Full question text if truncated
-        if (qa.question.length > 80) {
+        data.questions.forEach((q, idx) => {
+          ensureSpace(18);
+          const qNum = q.numberLabel || `Q${idx + 1}`;
+          const preview = q.question.replace(/\s+/g, ' ').slice(0, 92);
+          const suffix = q.question.length > 92 ? '…' : '';
           doc
-            .fontSize(10)
+            .fontSize(9)
             .font('Helvetica-Bold')
-            .fillColor(COLOR.muted)
-            .text('Full Question:', MARGIN + 8, doc.y);
-          doc.moveDown(0.3);
-          doc
-            .fontSize(10)
+            .fillColor(COLOR.ink)
+            .text(`${qNum}. `, M + 6, doc.y, { continued: true })
             .font('Helvetica')
-            .fillColor(COLOR.black)
-            .text(qa.question, MARGIN + 8, doc.y, { width: CONTENT_WIDTH - 16 });
-          doc.moveDown(0.7);
+            .fillColor(COLOR.muted)
+            .text(`${preview}${suffix}`, { width: CW - 12 });
+          doc.moveDown(0.2);
+        });
+
+        doc.addPage();
+        doc.y = 58;
+      }
+
+      // ── Questions & Complete Step-by-Step Solutions ──────────────────────
+      data.questions.forEach((qa, idx) => {
+        const qLabel = qa.numberLabel || `Q${idx + 1}`;
+        const pageTag = qa.sourcePage ? `Source Page ${qa.sourcePage}` : '';
+
+        // Measure header + question statement so heading never orphans at page bottom
+        const qStatementH = doc.heightOfString(qa.question, { width: CW - 16 });
+        ensureSpace(Math.min(180, 56 + qStatementH));
+
+        // Question Banner
+        const barY = doc.y;
+        doc.roundedRect(M, barY, CW, 24, 3).fill(COLOR.navy);
+        doc
+          .fontSize(10.5)
+          .font('Helvetica-Bold')
+          .fillColor('#ffffff')
+          .text(qLabel, M + 10, barY + 6, { width: CW - 110, lineBreak: false });
+
+        if (pageTag) {
+          doc
+            .fontSize(8.5)
+            .font('Helvetica')
+            .fillColor('#dbeafe')
+            .text(pageTag, M + CW - 105, barY + 7, { width: 95, align: 'right', lineBreak: false });
         }
 
-        // Answer
+        doc.y = barY + 30;
+
+        // Question Text
         doc
           .fontSize(10)
           .font('Helvetica-Bold')
-          .fillColor('#1b5e20')
-          .text('Answer:', MARGIN + 8, doc.y);
-        doc.moveDown(0.3);
+          .fillColor(COLOR.ink)
+          .text(qa.question, M + 4, doc.y, { width: CW - 8, lineGap: 2 });
+        doc.moveDown(0.6);
+
+        // Reasoning / Formulas
+        if (qa.reasoning && qa.reasoning.trim()) {
+          const reasonH = doc.heightOfString(qa.reasoning.trim(), { width: CW - 20 });
+          if (reasonH < 240) {
+            ensureSpace(reasonH + 26);
+          } else {
+            ensureSpace(50);
+          }
+
+          doc
+            .fontSize(9)
+            .font('Helvetica-Bold')
+            .fillColor(COLOR.navy)
+            .text('Theory, Formulas & Approach', M + 4, doc.y);
+          doc.moveDown(0.25);
+          doc
+            .fontSize(9.5)
+            .font('Helvetica')
+            .fillColor(COLOR.muted)
+            .text(qa.reasoning.trim(), M + 8, doc.y, { width: CW - 16, lineGap: 2 });
+          doc.moveDown(0.6);
+        }
+
+        // Solution Answer
+        ensureSpace(48);
+        doc
+          .fontSize(9.5)
+          .font('Helvetica-Bold')
+          .fillColor(COLOR.accentGreen)
+          .text('Step-by-Step Solution', M + 4, doc.y);
+        doc.moveDown(0.25);
 
         doc
-          .fontSize(10)
+          .fontSize(9.8)
           .font('Helvetica')
-          .fillColor(COLOR.black)
-          .text(qa.answer, MARGIN + 8, doc.y, {
-            width: CONTENT_WIDTH - 16,
-            lineGap: 2,
-          });
+          .fillColor(COLOR.body)
+          .text(qa.answer.trim(), M + 8, doc.y, { width: CW - 16, lineGap: 2.5 });
 
-        // Reasoning (if provided)
-        if (qa.reasoning) {
-          doc.moveDown(0.5);
+        if (qa.verificationNote && qa.verificationNote.trim()) {
+          doc.moveDown(0.45);
+          ensureSpace(26);
           doc
-            .fontSize(9.5)
-            .font('Helvetica-BoldOblique')
-            .fillColor(COLOR.muted)
-            .text('Reasoning / Explanation:', MARGIN + 8, doc.y);
-          doc.moveDown(0.2);
-          doc
-            .fontSize(9.5)
+            .fontSize(8.5)
             .font('Helvetica-Oblique')
-            .fillColor(COLOR.muted)
-            .text(qa.reasoning, MARGIN + 8, doc.y, {
-              width: CONTENT_WIDTH - 16,
-              lineGap: 2,
+            .fillColor(COLOR.subtle)
+            .text(`Verification Note: ${qa.verificationNote.trim()}`, M + 8, doc.y, {
+              width: CW - 16,
             });
         }
 
-        doc.moveDown(1.5);
-        // Separator
-        doc.rect(MARGIN, doc.y, CONTENT_WIDTH, 0.5).fill(COLOR.border);
-        doc.moveDown(1);
+        doc.moveDown(0.9);
+        doc.rect(M, doc.y, CW, 0.5).fill(COLOR.border);
+        doc.y += 14;
       });
 
-      // ── Footers on all pages (buffered page range) ─────────
+      // ── Verification & References Summary Block ──────────────────────────
+      if (data.verificationNotes && data.verificationNotes.trim()) {
+        const vH = doc.heightOfString(data.verificationNotes.trim(), { width: CW - 20 }) + 34;
+        ensureSpace(Math.min(vH, 160));
+        doc
+          .fontSize(10)
+          .font('Helvetica-Bold')
+          .fillColor(COLOR.navy)
+          .text('Technical Verification & Review Notes', M, doc.y);
+        doc.moveDown(0.3);
+        doc
+          .fontSize(9)
+          .font('Helvetica')
+          .fillColor(COLOR.muted)
+          .text(data.verificationNotes.trim(), M, doc.y, { width: CW, lineGap: 2 });
+      }
+
+      // ── Consistent Page Headers (p2+) and Footers (all pages) ────────────
       try {
         const range = doc.bufferedPageRange();
         for (let i = 0; i < range.count; i++) {
           doc.switchToPage(i);
+          const origBottomMargin = doc.page.margins.bottom;
+          // Temporarily disable bottom margin so footer text never triggers extra PDFKit page breaks
+          doc.page.margins.bottom = 0;
+
+          if (i > 0) {
+            doc
+              .fontSize(7.5)
+              .font('Helvetica')
+              .fillColor(COLOR.subtle)
+              .text(
+                `CAMPUSSARTHI AI — ${data.assignmentTitle.slice(0, 65)}`,
+                M,
+                26,
+                { width: CW, align: 'left', lineBreak: false }
+              );
+            doc.rect(M, 38, CW, 0.4).fill(COLOR.border);
+          }
+
+          doc.rect(M, PAGE_H - 42, CW, 0.4).fill(COLOR.border);
           doc
-            .fontSize(8)
-            .fillColor(COLOR.muted)
+            .fontSize(7.5)
             .font('Helvetica')
+            .fillColor(COLOR.subtle)
             .text(
-              `CampusPilot AI · Academic Study Draft · Page ${i + 1} of ${range.count}`,
-              MARGIN,
-              doc.page.height - 30,
-              {
-                align: 'center',
-                width: CONTENT_WIDTH,
-                lineBreak: false,
-              }
+              'AI-prepared academic draft. Please review and verify before academic submission.',
+              M,
+              PAGE_H - 34,
+              { width: CW - 75, align: 'left', height: 14, lineBreak: false }
             );
+          doc
+            .fontSize(7.5)
+            .font('Helvetica-Bold')
+            .fillColor(COLOR.muted)
+            .text(`Page ${i + 1} of ${range.count}`, M + CW - 70, PAGE_H - 34, {
+              width: 70,
+              align: 'right',
+              height: 14,
+              lineBreak: false,
+            });
+
+          doc.page.margins.bottom = origBottomMargin;
         }
       } catch (pageErr) {
-        logger.warn('Page numbering warning', { error: String(pageErr) });
+        logger.warn('PDF header/footer numbering warning', { error: String(pageErr) });
       }
 
       doc.end();
-
-      stream.on('finish', () => {
-        const stats = fs.statSync(filePath);
-        logger.info('Solution PDF generated', { filePath, sizeBytes: stats.size });
-        resolve(filePath);
-      });
-
-      stream.on('error', (err: Error) => {
-        logger.error('PDF stream error', { error: err.message });
-        reject(err);
-      });
     });
+  }
+
+  /**
+   * Backward-compatible wrapper writing the PDF to disk and returning filePath.
+   */
+  async generateSolutionPdf(data: SolutionPdfData): Promise<string> {
+    fs.mkdirSync(FALLBACK_DIR, { recursive: true });
+    const { buffer } = await this.generateSolutionPdfBuffer(data);
+    const filePath = path.join(FALLBACK_DIR, `solution-${randomUUID()}.pdf`);
+    fs.writeFileSync(filePath, buffer);
+    return filePath;
   }
 }
 

@@ -18,8 +18,8 @@ export function ActivityPage() {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <TopBar title="Activity" />
-      <main className="flex-1 overflow-y-auto p-6">
+      <TopBar title="Activity" subtitle="Synchronization, AI drafting, and authentication history" />
+      <main className="flex-1 overflow-y-auto p-4 sm:p-6">
         {isLoading ? (
           <div className="flex justify-center py-16">
             <LoadingSpinner size="lg" />
@@ -29,8 +29,8 @@ export function ActivityPage() {
         ) : activities.length === 0 ? (
           <EmptyState
             icon={<Activity className="h-6 w-6" />}
-            title="No activity yet"
-            description="Activity will appear here as you use CampusSarthi."
+            title="No activity recorded yet"
+            description="Authentication, LMS syncs, generated PDFs, and email alerts will appear here."
           />
         ) : (
           <Card>
@@ -44,4 +44,4 @@ export function ActivityPage() {
   );
 }
 
-export default ActivityPage
+export default ActivityPage;

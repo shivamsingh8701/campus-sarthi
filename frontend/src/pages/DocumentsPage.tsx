@@ -36,8 +36,11 @@ export function DocumentsPage() {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <TopBar title="Documents" />
-      <main className="flex-1 overflow-y-auto p-6">
+      <TopBar
+        title="Documents"
+        subtitle={`${documents.length} generated PDF solution${documents.length === 1 ? '' : 's'}`}
+      />
+      <main className="flex-1 overflow-y-auto p-4 sm:p-6">
         {isLoading ? (
           <div className="flex justify-center py-16">
             <LoadingSpinner size="lg" />
@@ -47,45 +50,53 @@ export function DocumentsPage() {
         ) : documents.length === 0 ? (
           <EmptyState
             icon={<FileText className="h-6 w-6" />}
-            title="No documents yet"
-            description="Analyze an assignment to generate a document."
+            title="No generated PDFs yet"
+            description="Generate an AI solution draft for any assignment to create a formatted PDF study document."
           />
         ) : (
-          <Card>
+          <Card className="overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-xs sm:text-sm">
                 <thead>
-                  <tr className="border-b border-gray-100">
-                    <th className="px-5 py-3 text-left text-xs font-medium text-gray-500">Filename</th>
-                    <th className="px-5 py-3 text-left text-xs font-medium text-gray-500">Assignment</th>
-                    <th className="px-5 py-3 text-left text-xs font-medium text-gray-500">Size</th>
-                    <th className="px-5 py-3 text-left text-xs font-medium text-gray-500">Generated</th>
-                    <th className="px-5 py-3 text-left text-xs font-medium text-gray-500"></th>
+                  <tr className="border-b border-slate-900/[0.06] bg-white/40 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    <th className="px-5 py-3">Document</th>
+                    <th className="px-5 py-3">Assignment</th>
+                    <th className="px-5 py-3">Size</th>
+                    <th className="px-5 py-3">Generated</th>
+                    <th className="px-5 py-3 text-right">Download</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-50">
+                <tbody className="divide-y divide-slate-900/[0.05]">
                   {documents.map((doc, idx) => (
-                    <tr key={doc._id || doc.id || idx} className="hover:bg-gray-50">
-                      <td className="px-5 py-3">
-                        <div className="flex items-center gap-2">
-                          <FileText className="h-4 w-4 text-gray-400 flex-shrink-0" />
-                          <span className="text-gray-900 font-medium truncate max-w-[200px]">
+                    <tr key={doc._id || doc.id || idx} className="hover:bg-white/60 transition-colors">
+                      <td className="px-5 py-3.5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-7 w-7 rounded-lg bg-indigo-50 border border-indigo-200/70 flex items-center justify-center text-indigo-600 shrink-0">
+                            <FileText className="h-3.5 w-3.5" />
+                          </div>
+                          <span className="text-slate-900 font-medium truncate max-w-[240px]">
                             {doc.filename}
                           </span>
                         </div>
                       </td>
-                      <td className="px-5 py-3 text-gray-500 truncate max-w-[180px]">
+                      <td className="px-5 py-3.5 text-slate-500 truncate max-w-[200px]">
                         {doc.assignment?.title || '—'}
                       </td>
-                      <td className="px-5 py-3 text-gray-500">{formatBytes(doc.fileSize ?? doc.fileSizeBytes)}</td>
-                      <td className="px-5 py-3 text-gray-500">
+                      <td className="px-5 py-3.5 text-slate-500">
+                        {formatBytes(doc.fileSize ?? doc.fileSizeBytes)}
+                      </td>
+                      <td className="px-5 py-3.5 text-slate-500">
                         {safeFormatDate(doc.generatedAt || doc.createdAt)}
                       </td>
-                      <td className="px-5 py-3">
-                        <a href={getDownloadUrl(doc._id || doc.id || '')} target="_blank" rel="noreferrer">
-                          <Button size="sm" variant="ghost" className="gap-1.5">
+                      <td className="px-5 py-3.5 text-right">
+                        <a
+                          href={getDownloadUrl(doc._id || doc.id || '')}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <Button size="sm" variant="outline" className="gap-1.5">
                             <Download className="h-3.5 w-3.5" />
-                            Download
+                            <span>PDF</span>
                           </Button>
                         </a>
                       </td>
@@ -101,4 +112,4 @@ export function DocumentsPage() {
   );
 }
 
-export default DocumentsPage
+export default DocumentsPage;

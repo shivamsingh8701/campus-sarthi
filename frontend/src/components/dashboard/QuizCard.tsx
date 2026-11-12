@@ -78,14 +78,13 @@ export function QuizCard({ quiz, onViewSolution }: QuizCardProps) {
   const status = getQuizStatus(closeDate, openDate, attemptsUsed, rawStatus);
 
   return (
-    <Card className="hover:border-indigo-200 transition-colors flex flex-col justify-between">
-      <CardBody className="space-y-3">
-        {/* Header */}
+    <Card className="hover:border-slate-900/15 flex flex-col justify-between">
+      <CardBody className="space-y-3 flex-1 flex flex-col">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-semibold text-gray-900">{quiz.title}</h3>
+            <h3 className="truncate text-sm font-semibold text-slate-900">{quiz.title}</h3>
             {courseTitle && (
-              <Badge variant="info" className="mt-1">
+              <Badge variant="info" className="mt-1.5 max-w-full truncate">
                 {courseTitle}
               </Badge>
             )}
@@ -96,51 +95,51 @@ export function QuizCard({ quiz, onViewSolution }: QuizCardProps) {
           </Badge>
         </div>
 
-        {/* Meta */}
-        <div className="space-y-1.5 text-xs text-gray-500">
+        <div className="space-y-1.5 text-xs text-slate-500">
           {openDate && (
             <div className="flex items-center gap-1.5">
-              <Calendar className="h-3.5 w-3.5 flex-shrink-0" />
+              <Calendar className="h-3.5 w-3.5 shrink-0 text-slate-400" />
               <span>Opens {format(openDate, 'MMM d, h:mm a')}</span>
             </div>
           )}
           {closeDate && (
             <div className="flex items-center gap-1.5">
-              <Calendar className="h-3.5 w-3.5 flex-shrink-0" />
+              <Calendar className="h-3.5 w-3.5 shrink-0 text-slate-400" />
               <span>
                 Closes {format(closeDate, 'MMM d, h:mm a')}
                 {closeDate > new Date() && (
-                  <span className="ml-1 text-gray-400">
+                  <span className="ml-1 text-slate-400">
                     ({formatDistanceToNow(closeDate, { addSuffix: true })})
                   </span>
                 )}
               </span>
             </div>
           )}
-          {timeLimit && (
-            <div className="flex items-center gap-1.5">
-              <Clock className="h-3.5 w-3.5 flex-shrink-0" />
-              <span>{timeLimit} min limit</span>
-            </div>
-          )}
-          {allowedAttempts && (
-            <span className={attemptsUsed > 0 ? 'text-emerald-700 font-medium' : ''}>
-              {attemptsUsed}/{allowedAttempts} attempts used
-            </span>
-          )}
+          <div className="flex flex-wrap items-center gap-3 pt-0.5">
+            {timeLimit && (
+              <span className="inline-flex items-center gap-1">
+                <Clock className="h-3.5 w-3.5 text-slate-400" />
+                {timeLimit} min
+              </span>
+            )}
+            {allowedAttempts !== undefined && (
+              <span className={attemptsUsed > 0 ? 'text-emerald-700 font-medium' : ''}>
+                Attempts: {attemptsUsed}/{allowedAttempts}
+              </span>
+            )}
+          </div>
         </div>
 
-        {/* AI Solution Action Button */}
         {onViewSolution && (
-          <div className="pt-2 border-t border-gray-100 flex items-center justify-between">
+          <div className="pt-3 mt-auto border-t border-slate-900/[0.06]">
             <Button
               size="sm"
               variant="outline"
               onClick={() => onViewSolution(quiz._id || quiz.id || quiz.lmsQuizId)}
-              className="w-full text-xs gap-1.5 border-emerald-200 text-emerald-700 hover:bg-emerald-50 h-8"
+              className="w-full text-xs gap-1.5"
             >
-              <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
-              <span>{status.variant === 'success' ? 'Post-Submission Solutions' : 'Quiz Solution Guide'}</span>
+              <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+              <span>{status.variant === 'success' ? 'Post-Submission Review' : 'Prepare Study Guide'}</span>
             </Button>
           </div>
         )}

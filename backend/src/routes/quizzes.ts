@@ -317,7 +317,7 @@ router.post('/:id/solution', requireAuth, async (req: Request, res: Response): P
       description = demoQuiz.description ?? '';
     } else {
       const quiz = await Quizzes.findById(targetId);
-      if (!quiz) {
+      if (!quiz || quiz.student_id !== studentId) {
         res.status(404).json({ error: 'Quiz not found.' });
         return;
       }
@@ -328,7 +328,8 @@ router.post('/:id/solution', requireAuth, async (req: Request, res: Response): P
     }
 
     // Check cache first
-    const cached = quizSolutionCache.get(targetId);
+    const cacheKey = `${studentId}:${targetId}`;
+    const cached = quizSolutionCache.get(cacheKey);
     if (cached) {
       res.json({ success: true, data: cached });
       return;
@@ -358,7 +359,7 @@ Keep formatting clean and easy to read.`;
       generatedAt: new Date().toISOString(),
     };
 
-    quizSolutionCache.set(targetId, solutionData);
+    quizSolutionCache.set(cacheKey, solutionData);
 
     res.json({ success: true, data: solutionData });
   } catch (err) {
@@ -369,8 +370,18 @@ Keep formatting clean and easy to read.`;
 
 // --- GET /quizzes/:id/solution --------------------------------
 router.get('/:id/solution', requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const studentId = req.student!.id;
   const targetId = String(req.params['id']);
-  const cached = quizSolutionCache.get(targetId);
+
+  if (!isDemoStudent(studentId)) {
+    const quiz = await Quizzes.findById(targetId);
+    if (!quiz || quiz.student_id !== studentId) {
+      res.status(404).json({ success: false, error: 'Quiz not found.' });
+      return;
+    }
+  }
+
+  const cached = quizSolutionCache.get(`${studentId}:${targetId}`) ?? quizSolutionCache.get(targetId);
 
   if (cached) {
     res.json({ success: true, data: cached });

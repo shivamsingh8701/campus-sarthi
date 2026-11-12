@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { RefreshCw, AlertCircle, CheckCircle } from 'lucide-react';
+import { RefreshCw, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { Button } from '@/components/ui/Button';
 import { LMSConnectModal } from '@/components/auth/LMSConnectModal';
@@ -38,7 +38,7 @@ function parseLastSyncDate(lastSync: unknown): Date | null {
   return null;
 }
 
-function formatLastSync(lastSync: unknown): string | null {
+export function formatLastSync(lastSync: unknown): string | null {
   const date = parseLastSyncDate(lastSync);
   if (!date) return null;
   try {
@@ -61,39 +61,36 @@ export function LMSStatusBanner({
   if (isConnected) {
     return (
       <>
-        <div className="flex items-center justify-between rounded-lg border border-green-200 bg-green-50 px-4 py-3">
+        <div className="glass-surface flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl px-5 py-3.5 border-emerald-500/20">
           <div className="flex items-center gap-3">
-            <CheckCircle className="h-4 w-4 flex-shrink-0 text-green-600" />
+            <div className="h-8 w-8 rounded-xl bg-emerald-50 border border-emerald-200/70 flex items-center justify-center shrink-0">
+              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+            </div>
             <div>
-              <p className="text-sm font-medium text-green-800">
-                LMS Connected · {status?.username || 'Active'}
+              <p className="text-xs font-semibold text-slate-900">
+                Galgotias LMS Connected · {status?.username || 'Active Session'}
               </p>
-              {syncTimeStr && (
-                <p className="text-xs text-green-600">
-                  Last synced {syncTimeStr}
-                </p>
-              )}
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {syncTimeStr
+                  ? `Last successful sync ${syncTimeStr}`
+                  : 'Authenticated session active and ready to synchronize'}
+              </p>
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             {onSync && (
               <Button
                 size="sm"
                 variant="outline"
                 onClick={onSync}
                 isLoading={isSyncing}
-                className="border-green-300 text-green-800 hover:bg-green-100 gap-1.5"
+                className="gap-1.5"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
                 Sync Now
               </Button>
             )}
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setShowModal(true)}
-              className="text-green-700 hover:bg-green-100"
-            >
+            <Button size="sm" variant="ghost" onClick={() => setShowModal(true)}>
               Manage
             </Button>
           </div>
@@ -111,21 +108,23 @@ export function LMSStatusBanner({
 
   return (
     <>
-      <div className="flex items-center justify-between rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-3">
+      <div className="glass-surface flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl px-5 py-3.5 border-amber-400/35">
         <div className="flex items-center gap-3">
-          <AlertCircle className="h-4 w-4 flex-shrink-0 text-yellow-600" />
+          <div className="h-8 w-8 rounded-xl bg-amber-50 border border-amber-200/80 flex items-center justify-center shrink-0">
+            <AlertCircle className="h-4 w-4 text-amber-600" />
+          </div>
           <div>
-            <p className="text-sm font-medium text-yellow-800">LMS Not Connected</p>
-            <p className="text-xs text-yellow-600">
-              Connect your Galgotias LMS account to track assignments and quizzes automatically.
+            <p className="text-xs font-semibold text-slate-900">Galgotias LMS Disconnected</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Connect your university account to sync real courses, deadlines, and PDF assignments.
             </p>
           </div>
         </div>
         <Button
           size="sm"
-          variant="secondary"
+          variant="default"
           onClick={() => setShowModal(true)}
-          className="flex-shrink-0 border-yellow-300 bg-white hover:bg-yellow-100 text-yellow-900"
+          className="shrink-0"
         >
           Connect LMS
         </Button>

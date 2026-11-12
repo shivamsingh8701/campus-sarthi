@@ -25,7 +25,7 @@ export function Card({ children, className }: CardProps) {
   return (
     <div
       className={cn(
-        'rounded-lg border border-gray-200 bg-white shadow-sm',
+        'glass-surface rounded-2xl transition-[box-shadow,border-color] duration-200',
         className
       )}
     >
@@ -36,7 +36,7 @@ export function Card({ children, className }: CardProps) {
 
 export function CardHeader({ children, className }: CardHeaderProps) {
   return (
-    <div className={cn('px-5 py-4 border-b border-gray-100', className)}>
+    <div className={cn('px-5 py-4 border-b border-slate-900/[0.06]', className)}>
       {children}
     </div>
   );
@@ -48,7 +48,7 @@ export function CardBody({ children, className }: CardBodyProps) {
 
 export function CardFooter({ children, className }: CardFooterProps) {
   return (
-    <div className={cn('px-5 py-4 border-t border-gray-100', className)}>
+    <div className={cn('px-5 py-3.5 border-t border-slate-900/[0.06]', className)}>
       {children}
     </div>
   );

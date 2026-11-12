@@ -69,21 +69,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshStudent = async () => {
     try {
       setLoading(true);
-      const response = await authApi.getMe();
-      const rawData = response.data as unknown as Record<string, unknown>;
-      const rawStudent = (rawData?.student || rawData) as Record<string, unknown>;
+      const response = (await authApi.getMe()) as unknown as {
+        success?: boolean;
+        data?: Record<string, unknown> & { student?: Record<string, unknown> };
+        student?: Record<string, unknown>;
+      };
+      const rawStudent = (
+        response?.data?.student ||
+        response?.data ||
+        response?.student
+      ) as Record<string, unknown> | undefined;
 
-      if (response.success && rawStudent && (rawStudent['id'] || rawStudent['_id'])) {
+      if (rawStudent && (rawStudent['id'] || rawStudent['_id'])) {
         const student = {
           ...rawStudent,
           _id: (rawStudent['_id'] || rawStudent['id']) as string,
           id: (rawStudent['id'] || rawStudent['_id']) as string,
           admissionNumber: (rawStudent['admissionNumber'] || rawStudent['admission_number']) as string,
           email: rawStudent['email'] as string,
-          name: (rawStudent['name'] || rawStudent['full_name']) as string | undefined,
-          emailVerified: Boolean(rawStudent['emailVerified'] ?? rawStudent['is_email_verified']),
+          name: (rawStudent['name'] || rawStudent['fullName'] || rawStudent['full_name']) as string | undefined,
+          fullName: (rawStudent['fullName'] || rawStudent['full_name'] || rawStudent['name']) as string | undefined,
+          emailVerified: Boolean(rawStudent['emailVerified'] ?? rawStudent['isEmailVerified'] ?? rawStudent['is_email_verified']),
           isEmailVerified: Boolean(rawStudent['isEmailVerified'] ?? rawStudent['is_email_verified']),
+          isDemo: Boolean(rawStudent['isDemo']),
+          authMode: (rawStudent['authMode'] as Student['authMode']) || undefined,
           lmsConnected: Boolean(rawStudent['lmsConnected']),
+          lmsUsername: (rawStudent['lmsUsername'] as string | null) ?? null,
+          lmsExpiresAt: (rawStudent['lmsExpiresAt'] as string | null) ?? null,
+          lastSync: (rawStudent['lastSync'] as string | null) ?? null,
           createdAt: String(rawStudent['createdAt'] || rawStudent['created_at'] || new Date().toISOString()),
           updatedAt: String(rawStudent['updatedAt'] || rawStudent['updated_at'] || new Date().toISOString()),
         } as unknown as Student;

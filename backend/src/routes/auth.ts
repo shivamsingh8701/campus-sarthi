@@ -1,339 +1,578 @@
 // ============================================================
-// CampusSarthi — Auth Routes
-// POST /api/v1/auth/register
-// POST /api/v1/auth/login
-// POST /api/v1/auth/logout
-// GET  /api/v1/auth/verify-email
-// GET  /api/v1/auth/me
-// PUT  /api/v1/auth/change-password
+// CampusSarthi — Authentication Routes
+// Genuine Galgotias LMS Auth, Separate Campus Account Auth, & Explicit Demo Mode
 // ============================================================
 
 import { Router, Request, Response } from 'express';
-import { z } from 'zod';
-import { Students, ActivityLogs, LMSSessions } from '../db/queries';
-import { hashPassword, verifyPassword, generateToken as genCryptoToken, encrypt } from '../utils/crypto';
-import { generateToken, setSessionCookie, clearSessionCookie } from '../middleware/auth';
-import requireAuth from '../middleware/auth';
-import { validateBody } from '../middleware/validation';
-import { authLimiter } from '../middleware/rateLimiter';
-import { logger } from '../utils/logger';
-import type { StudentRow } from '../types/db';
+import rateLimit from 'express-rate-limit';
+import { Students, LMSSessions, ActivityLogs, SyncRecords } from '../db/queries';
 import {
-  DEMO_EMAIL,
-  DEMO_PASSWORD,
+  hashPassword,
+  verifyPassword,
+  encrypt,
+  generateToken as generateHexToken,
+} from '../utils/crypto';
+import {
+  generateToken as generateJwt,
+  setSessionCookie,
+  clearSessionCookie,
+  requireAuth,
+} from '../middleware/auth';
+import { logger } from '../utils/logger';
+import { LMSConnector } from '../services/lms/connector';
+import { SyncJob } from '../services/scheduler/syncJob';
+import { emailSender } from '../services/email/sender';
+import {
   DEMO_STUDENT,
   DEMO_STUDENT_ID,
   DEMO_ADMISSION_NUMBER,
+  DEMO_EMAIL,
+  isDemoStudent,
 } from '../services/demo/demoData';
-import { EmailSender } from '../services/email/sender';
-import { LMSConnector } from '../services/lms/connector';
-import { SyncJob } from '../services/scheduler/syncJob';
-import config from '../config';
+import type { AuthMode, StudentPublic } from '../types';
+import type { StudentRow } from '../types/db';
 
 const router = Router();
 
-// ─── Schemas ─────────────────────────────────────────────────
-
-const registerSchema = z.object({
-  admissionNumber: z
-    .string()
-    .min(4, 'Admission number must be at least 4 characters')
-    .max(30)
-    .regex(/^[A-Za-z0-9_-]+$/, 'Admission number must be alphanumeric'),
-  name: z.string().max(100).optional(),
-  email: z.string().email('Invalid email address').toLowerCase(),
-  password: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
-    .regex(/[0-9]/, 'Password must contain at least one number'),
-  confirmPassword: z.string().optional(),  // validated on frontend; optional here
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 25,
+  message: { error: 'Too many authentication attempts. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
-const loginSchema = z.object({
-  email: z.string().min(1, 'Email or Admission Number is required').trim(),
-  password: z.string().min(1, 'Password is required'),
-});
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
 
-const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1),
-  newPassword: z
-    .string()
-    .min(8)
-    .regex(/[A-Z]/, 'Password must contain an uppercase letter')
-    .regex(/[0-9]/, 'Password must contain a number'),
-});
-
-// ─── POST /register ───────────────────────────────────────────
-
-router.post(
-  '/register',
-  authLimiter,
-  validateBody(registerSchema),
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { admissionNumber, name, email, password } = req.body as z.infer<typeof registerSchema>;
-
-      // Check uniqueness
-      const [existingEmail, existingAdmission] = await Promise.all([
-        Students.findByEmail(email),
-        Students.findByAdmissionNumber(admissionNumber),
-      ]);
-
-      if (existingEmail) {
-        res.status(409).json({ error: 'An account with this email already exists.' });
-        return;
-      }
-      if (existingAdmission) {
-        res.status(409).json({ error: 'An account with this admission number already exists.' });
-        return;
-      }
-
-      const passwordHash = await hashPassword(password);
-      const verificationToken = genCryptoToken(32);
-
-      const student = await Students.create({
-        admissionNumber,
-        name,
-        email,
-        passwordHash,
-        verificationToken,
-      });
-
-      // Auto-verify immediately so the user can login right away
-      const sr = student as unknown as StudentRow;
-      try {
-        await Students.markEmailVerified(sr.id);
-      } catch {
-        // Non-fatal
-      }
-
-      // Send verification email (non-blocking — don't fail registration if email fails)
-      try {
-        const emailSender = new EmailSender();
-        await emailSender.sendVerificationEmail(email, verificationToken);
-      } catch (emailErr) {
-        logger.warn('Verification email failed to send', { email, error: String(emailErr) });
-      }
-
-      logger.info('Student registered', { studentId: sr.id, email });
-
-      res.status(201).json({
-        success: true,
-        message: 'Registration successful! You can now log in.',
-        data: {
-          id: sr.id,
-          admissionNumber: sr.admission_number,
-          email: sr.email,
-          isEmailVerified: true,
-        },
-      });
-    } catch (err) {
-      logger.error('Registration failed', { error: String(err) });
-      res.status(500).json({ error: 'Registration failed. Please try again.' });
-    }
+function buildStudentPublic(
+  student: StudentRow,
+  opts: {
+    isDemo: boolean;
+    authMode: AuthMode;
+    lmsConnected?: boolean;
+    lmsUsername?: string | null;
+    lmsExpiresAt?: string | null;
+    lastSync?: string | null;
   }
-);
+): StudentPublic & { lmsExpiresAt?: string | null } {
+  return {
+    id: student.id,
+    admissionNumber: student.admission_number,
+    email: student.email,
+    name: student.full_name || student.admission_number,
+    fullName: student.full_name,
+    isEmailVerified: student.is_email_verified,
+    isDemo: opts.isDemo,
+    authMode: opts.authMode,
+    lmsConnected: opts.lmsConnected ?? false,
+    lmsUsername: opts.lmsUsername ?? null,
+    lmsExpiresAt: opts.lmsExpiresAt ?? null,
+    lastSync: opts.lastSync ?? null,
+    createdAt: new Date(student.created_at),
+  };
+}
 
-// ─── POST /login ──────────────────────────────────────────────
+function mapLmsStatusToHttp(status?: string): number {
+  switch (status) {
+    case 'invalid_credentials':
+      return 401;
+    case 'requires_verification':
+    case 'account_disabled':
+      return 403;
+    case 'lms_unavailable':
+      return 503;
+    case 'page_changed':
+      return 502;
+    default:
+      return 401;
+  }
+}
 
-router.post(
-  '/login',
-  authLimiter,
-  validateBody(loginSchema),
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { email, password } = req.body as z.infer<typeof loginSchema>;
-      const inputLower = email.toLowerCase().trim();
+// ─── POST /register ──────────────────────────────────────────
 
-      // Check demo credentials by email or admission number (case-insensitive)
-      if (
-        (inputLower === DEMO_EMAIL.toLowerCase() || inputLower === DEMO_ADMISSION_NUMBER.toLowerCase()) &&
-        password === DEMO_PASSWORD
-      ) {
-        const token = generateToken(DEMO_STUDENT.id, DEMO_STUDENT.email);
-        setSessionCookie(res, token);
-        logger.info('Demo student logged in', { studentId: DEMO_STUDENT.id });
-        const studentPayload = {
-          _id: DEMO_STUDENT.id,
-          id: DEMO_STUDENT.id,
-          admissionNumber: DEMO_STUDENT.admission_number,
-          email: DEMO_STUDENT.email,
-          name: DEMO_STUDENT.full_name ?? 'Aarav Sharma (Demo Student)',
-          emailVerified: DEMO_STUDENT.is_email_verified,
-          isEmailVerified: DEMO_STUDENT.is_email_verified,
-          lmsConnected: true,
-          lmsUsername: DEMO_STUDENT.admission_number,
-          createdAt: DEMO_STUDENT.created_at,
-          updatedAt: DEMO_STUDENT.updated_at,
-        };
-        res.json({
-          success: true,
-          message: 'Logged in successfully.',
-          data: {
-            token,
-            student: studentPayload,
-            ...studentPayload,
-          },
-        });
+router.post('/register', authLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const {
+      name,
+      admissionNumber,
+      email,
+      password,
+      confirmPassword,
+      authType = 'lms',
+    } = req.body as {
+      name?: string;
+      admissionNumber?: string;
+      email?: string;
+      password?: string;
+      confirmPassword?: string;
+      authType?: 'lms' | 'campus';
+    };
+
+    if (!admissionNumber?.trim() || !email?.trim() || !password || !confirmPassword) {
+      res.status(400).json({ error: 'Admission number, email, password, and confirmation are required.' });
+      return;
+    }
+
+    const cleanAdmission = admissionNumber.trim().toUpperCase();
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (!isValidEmail(cleanEmail)) {
+      res.status(400).json({ error: 'Please provide a valid email address.' });
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      res.status(400).json({ error: 'Passwords do not match.' });
+      return;
+    }
+
+    if (password.length < 6) {
+      res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      return;
+    }
+
+    if (authType === 'campus' && password.length < 8) {
+      res.status(400).json({ error: 'CampusSarthi password must be at least 8 characters.' });
+      return;
+    }
+
+    // Never allow registering reserved demo identifiers
+    if (cleanAdmission === DEMO_ADMISSION_NUMBER || cleanEmail === DEMO_EMAIL) {
+      res.status(400).json({ error: 'This identifier is reserved for Demo Mode.' });
+      return;
+    }
+
+    // Check existing records without leaking which field collided to enumerators
+    const [existingByEmail, existingByAdm] = await Promise.all([
+      Students.findByEmail(cleanEmail),
+      Students.findByAdmissionNumber(cleanAdmission),
+    ]);
+
+    if (existingByEmail || existingByAdm) {
+      res.status(409).json({
+        error: 'Unable to complete registration with these details. Please sign in to your existing account or use different details.',
+      });
+      return;
+    }
+
+    let lmsCookies: NonNullable<Awaited<ReturnType<LMSConnector['login']>>['sessionCookies']> | undefined;
+    let detectedName = name?.trim() || undefined;
+
+    // Genuine Galgotias LMS credential verification on default registration
+    if (authType !== 'campus') {
+      const lms = new LMSConnector({ headless: true });
+      try {
+        await lms.launch();
+        const loginResult = await lms.login(cleanAdmission, password);
+
+        if (!loginResult.success || !loginResult.sessionCookies) {
+          res.status(mapLmsStatusToHttp(loginResult.status)).json({
+            error:
+              loginResult.errorMessage ||
+              'Galgotias LMS rejected these credentials. Use your real university password or switch to Standalone Account.',
+            code: loginResult.status?.toUpperCase() || 'LMS_AUTH_FAILED',
+            verificationType: loginResult.verificationType,
+          });
+          return;
+        }
+
+        lmsCookies = loginResult.sessionCookies;
+        if (!detectedName && loginResult.studentName) {
+          detectedName = loginResult.studentName;
+        }
+      } finally {
+        await lms.close();
+      }
+    }
+
+    // Never hash or store the university password on CampusSarthi when authType === 'lms'
+    const storedHash =
+      authType === 'campus'
+        ? await hashPassword(password)
+        : await hashPassword(generateHexToken(32));
+
+    const verificationToken = generateHexToken(32);
+
+    const student = await Students.create({
+      admissionNumber: cleanAdmission,
+      name: detectedName,
+      email: cleanEmail,
+      passwordHash: storedHash,
+      verificationToken,
+      isEmailVerified: true,
+    });
+
+    // Optionally send welcome/verification email asynchronously without failing registration
+    void emailSender.sendVerificationEmail(cleanEmail, verificationToken).catch((mailErr) => {
+      logger.warn('Verification email skipped/failed during registration', {
+        studentId: student.id,
+        error: mailErr instanceof Error ? mailErr.message : String(mailErr),
+      });
+    });
+
+    let lmsConnected = false;
+    let expiresAt: string | null = null;
+
+    if (lmsCookies) {
+      const encrypted = encrypt(JSON.stringify(lmsCookies));
+      const sess = await LMSSessions.create({
+        studentId: student.id,
+        sessionDataEncrypted: encrypted,
+        lmsUsername: cleanAdmission,
+      });
+      lmsConnected = true;
+      expiresAt = sess.expires_at;
+
+      await ActivityLogs.create({
+        studentId: student.id,
+        type: 'lms_connected',
+        description: `Registered and authenticated with Galgotias LMS (${cleanAdmission})`,
+      });
+
+      SyncJob.getInstance()
+        .runSyncForStudent(student.id)
+        .catch((err) => logger.warn('Post-register LMS sync failed', { studentId: student.id, error: String(err) }));
+    }
+
+    const authMode: AuthMode = authType === 'campus' ? 'campus' : 'lms';
+    const token = generateJwt(student.id, student.email, { isDemo: false, authMode, rememberMe: true });
+    setSessionCookie(res, token, true);
+
+    await ActivityLogs.create({
+      studentId: student.id,
+      type: 'login',
+      description: `Student account created (${authMode} authentication)`,
+    });
+
+    logger.info('Student registered cleanly', { studentId: student.id, authMode, lmsConnected });
+
+    const publicStudent = buildStudentPublic(student, {
+      isDemo: false,
+      authMode,
+      lmsConnected,
+      lmsUsername: lmsConnected ? cleanAdmission : null,
+      lmsExpiresAt: expiresAt,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: lmsConnected
+        ? 'Account created and connected to Galgotias LMS. Synchronizing your courses now.'
+        : 'CampusSarthi account created. Connect Galgotias LMS in Integrations when ready.',
+      data: { student: publicStudent },
+      student: publicStudent,
+    });
+  } catch (err) {
+    const statusCode = (err as { statusCode?: number }).statusCode || 500;
+    logger.error('Register error', { error: err instanceof Error ? err.message : String(err) });
+    res.status(statusCode).json({
+      error: statusCode === 503
+        ? 'Database service unavailable. Please check Supabase configuration.'
+        : 'Registration failed due to a server error.',
+    });
+  }
+});
+
+// ─── POST /login ─────────────────────────────────────────────
+
+router.post('/login', authLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const {
+      identifier,
+      admissionNumber,
+      email,
+      password,
+      mode = 'lms',
+      rememberMe = true,
+      name,
+    } = req.body as {
+      identifier?: string;
+      admissionNumber?: string;
+      email?: string;
+      password?: string;
+      mode?: 'lms' | 'campus';
+      rememberMe?: boolean;
+      name?: string;
+    };
+
+    const rawId = (admissionNumber || identifier || email || '').trim();
+    if (!rawId || !password) {
+      res.status(400).json({ error: 'Admission number (or email) and password are required.' });
+      return;
+    }
+
+    // Never silently fall back or accept demo credentials on the real login route
+    if (
+      rawId.toLowerCase() === DEMO_EMAIL ||
+      rawId.toUpperCase() === DEMO_ADMISSION_NUMBER
+    ) {
+      res.status(400).json({
+        error: 'Demo credentials cannot be used for real university login. Use the explicit "Explore Demo Mode" option instead.',
+        code: 'USE_EXPLICIT_DEMO',
+      });
+      return;
+    }
+
+    // ── Path A: Independent CampusSarthi App Password Login ──
+    if (mode === 'campus') {
+      const student = rawId.includes('@')
+        ? await Students.findByEmail(rawId)
+        : await Students.findByAdmissionNumber(rawId);
+
+      if (!student || isDemoStudent(student.id)) {
+        res.status(401).json({ error: 'Invalid CampusSarthi credentials.' });
         return;
       }
 
-      let student = await Students.findByEmail(email);
-      if (!student) {
-        student = await Students.findByAdmissionNumber(email);
-      }
-
-      let passwordValid = false;
-      if (student) {
-        passwordValid = await verifyPassword(password, student.password_hash);
-      }
-
-      // If user not found OR local password did not match, attempt live Galgotias LMS login
-      let lmsConnectedNow = false;
-      if (!passwordValid) {
-        logger.info('Attempting university LMS authentication for student login', { username: email });
-        const connector = new LMSConnector({ headless: true, timeout: 35000 });
-        try {
-          await connector.launch();
-          const lmsResult = await connector.login(email, password);
-          if (lmsResult.success) {
-            logger.info('University LMS credentials verified, auto-provisioning student', { username: email });
-            const passwordHash = await hashPassword(password);
-            const verificationToken = genCryptoToken(32);
-            const admissionNumber = email.toUpperCase();
-            const studentEmail = email.includes('@')
-              ? email.toLowerCase()
-              : `${email.toLowerCase()}@galgotiasuniversity.edu.in`;
-
-            if (!student) {
-              student = await Students.create({
-                admissionNumber,
-                name: `Student (${admissionNumber})`,
-                email: studentEmail,
-                passwordHash,
-                verificationToken,
-              });
-            } else {
-              await Students.updatePassword(student.id, passwordHash);
-            }
-
-            // Ensure email marked verified
-            await Students.markEmailVerified(student.id);
-            student.is_email_verified = true;
-
-            // Save encrypted LMS session cookies
-            const cookiesJson = JSON.stringify(lmsResult.sessionCookies ?? []);
-            await LMSSessions.deactivateAll(student.id);
-            await LMSSessions.create({
-              studentId: student.id,
-              sessionDataEncrypted: encrypt(cookiesJson),
-              lmsUsername: admissionNumber,
-            });
-
-            // Start background sync
-            SyncJob.getInstance()
-              .runSyncForStudent(student.id)
-              .catch((err) => logger.warn('Background sync after LMS login error', { error: String(err) }));
-
-            passwordValid = true;
-            lmsConnectedNow = true;
-          }
-        } catch (lmsErr) {
-          logger.warn('Direct LMS auth attempt failed', { error: String(lmsErr) });
-        } finally {
-          await connector.close().catch(() => {});
-        }
-      }
-
-      if (!student || !passwordValid) {
-        res.status(401).json({ error: 'Invalid admission number/email or password.' });
+      const valid = await verifyPassword(password, student.password_hash);
+      if (!valid) {
+        res.status(401).json({ error: 'Invalid CampusSarthi credentials.' });
         return;
       }
 
-      // Auto-verify email if not yet verified (allow login regardless)
-      if (!student.is_email_verified) {
-        try {
-          await Students.markEmailVerified(student.id);
-          student.is_email_verified = true;
-        } catch {
-          // Non-fatal — continue login
-        }
-      }
+      const activeLms = await LMSSessions.findActiveByStudentId(student.id);
+      const latestSync = await SyncRecords.findLatestByStudentId(student.id);
 
-      const token = generateToken(student.id, student.email);
-      setSessionCookie(res, token);
+      const token = generateJwt(student.id, student.email, {
+        isDemo: false,
+        authMode: 'campus',
+        rememberMe,
+      });
+      setSessionCookie(res, token, rememberMe);
 
       await ActivityLogs.create({
         studentId: student.id,
         type: 'login',
-        description: 'Student logged in',
-        metadata: { ip: req.ip },
+        description: 'Signed in with CampusSarthi account password',
       });
 
-      logger.info('Student logged in', { studentId: student.id });
-
-      const activeSession = await LMSSessions.findActiveByStudentId(student.id);
-      const isLmsConnected = Boolean(activeSession) || lmsConnectedNow;
-
-      const studentPayload = {
-        _id: student.id,
-        id: student.id,
-        admissionNumber: student.admission_number,
-        email: student.email,
-        name: student.full_name ?? student.email,
-        emailVerified: student.is_email_verified,
-        isEmailVerified: student.is_email_verified,
-        lmsConnected: isLmsConnected,
-        lmsUsername: activeSession?.lms_username ?? (isLmsConnected ? student.admission_number : undefined),
-        createdAt: student.created_at,
-        updatedAt: student.updated_at,
-      };
+      const campusPublicStudent = buildStudentPublic(student, {
+        isDemo: false,
+        authMode: 'campus',
+        lmsConnected: Boolean(activeLms),
+        lmsUsername: activeLms?.lms_username ?? null,
+        lmsExpiresAt: activeLms?.expires_at ?? null,
+        lastSync: latestSync?.completed_at ?? latestSync?.started_at ?? null,
+      });
 
       res.json({
         success: true,
-        message: 'Login successful.',
-        data: {
-          token,
-          student: studentPayload,
-          ...studentPayload,
-        },
+        message: 'Signed in successfully.',
+        data: { student: campusPublicStudent },
+        student: campusPublicStudent,
       });
-    } catch (err) {
-      logger.error('Login failed', { error: String(err) });
-      res.status(500).json({ error: 'Login failed. Please try again.' });
-    }
-  }
-);
-
-// ─── POST /logout ─────────────────────────────────────────────
-
-router.post('/logout', requireAuth, async (req: Request, res: Response): Promise<void> => {
-  try {
-    clearSessionCookie(res);
-
-    if (req.student) {
-      await ActivityLogs.create({
-        studentId: req.student.id,
-        type: 'logout',
-        description: 'Student logged out',
-        metadata: {},
-      });
+      return;
     }
 
-    res.json({ success: true, message: 'Logged out successfully.' });
+    // ── Path B: Genuine Galgotias University LMS Login ───────
+    const cleanAdmission = rawId.toUpperCase();
+    logger.info('Attempting genuine Galgotias LMS login', { username: cleanAdmission });
+
+    const lms = new LMSConnector({ headless: true });
+    let loginResult: Awaited<ReturnType<LMSConnector['login']>>;
+    try {
+      await lms.launch();
+      loginResult = await lms.login(rawId, password);
+    } finally {
+      await lms.close();
+    }
+
+    if (!loginResult.success || !loginResult.sessionCookies) {
+      logger.warn('Galgotias LMS login failed', {
+        username: cleanAdmission,
+        status: loginResult.status,
+      });
+      res.status(mapLmsStatusToHttp(loginResult.status)).json({
+        error: loginResult.errorMessage || 'Invalid university admission number or LMS password.',
+        code: loginResult.status?.toUpperCase() || 'INVALID_LMS_CREDENTIALS',
+        verificationType: loginResult.verificationType,
+      });
+      return;
+    }
+
+    // LMS authenticated! Retrieve or create the student's real CampusSarthi profile.
+    let student = await Students.findByAdmissionNumber(cleanAdmission);
+    if (!student && rawId.includes('@')) {
+      student = await Students.findByEmail(rawId);
+    }
+
+    if (!student) {
+      const providedEmail = email?.trim().toLowerCase();
+      if (!providedEmail || !isValidEmail(providedEmail)) {
+        // LMS credentials succeeded, ask student to provide their email to create profile cleanly (never invent fake records)
+        res.status(422).json({
+          code: 'EMAIL_REQUIRED',
+          requiresEmail: true,
+          verifiedAdmissionNumber: cleanAdmission,
+          detectedName: loginResult.studentName || null,
+          error:
+            'Galgotias LMS verified! Enter your email address to complete creating your CampusSarthi profile.',
+        });
+        return;
+      }
+
+      const existingEmailOwner = await Students.findByEmail(providedEmail);
+      if (existingEmailOwner) {
+        res.status(409).json({
+          error: 'Unable to link this email address. Please sign in with the matching account or use another email.',
+        });
+        return;
+      }
+
+      // Create profile with random non-university internal secret hash (never stores university password)
+      const verificationToken = generateHexToken(32);
+      student = await Students.create({
+        admissionNumber: cleanAdmission,
+        name: name?.trim() || loginResult.studentName || undefined,
+        email: providedEmail,
+        passwordHash: await hashPassword(generateHexToken(32)),
+        verificationToken,
+        isEmailVerified: true,
+      });
+    } else if (!student.full_name && loginResult.studentName) {
+      const updated = await Students.updateProfile(student.id, { fullName: loginResult.studentName });
+      if (updated) student = updated;
+    }
+
+    // Rotate & store AES-256-GCM encrypted LMS session cookies
+    await LMSSessions.deactivateAll(student.id);
+    const expiresAtDate = new Date(Date.now() + (rememberMe ? 30 : 1) * 86400000);
+    const lmsSession = await LMSSessions.create({
+      studentId: student.id,
+      sessionDataEncrypted: encrypt(JSON.stringify(loginResult.sessionCookies)),
+      lmsUsername: rawId,
+      expiresAt: expiresAtDate,
+    });
+
+    const token = generateJwt(student.id, student.email, {
+      isDemo: false,
+      authMode: 'lms',
+      rememberMe,
+    });
+    setSessionCookie(res, token, rememberMe);
+
+    await ActivityLogs.create({
+      studentId: student.id,
+      type: 'login',
+      description: `Signed in via Galgotias LMS (${cleanAdmission})`,
+    });
+
+    const latestSync = await SyncRecords.findLatestByStudentId(student.id);
+
+    // Kick off fresh real LMS sync in background
+    SyncJob.getInstance()
+      .runSyncForStudent(student.id)
+      .catch((err) =>
+        logger.warn('Post-login background sync failed', { studentId: student?.id, error: String(err) })
+      );
+
+    logger.info('Real student authenticated cleanly via Galgotias LMS', { studentId: student.id });
+
+    const lmsPublicStudent = buildStudentPublic(student, {
+      isDemo: false,
+      authMode: 'lms',
+      lmsConnected: true,
+      lmsUsername: rawId,
+      lmsExpiresAt: lmsSession.expires_at,
+      lastSync: latestSync?.completed_at ?? latestSync?.started_at ?? null,
+    });
+
+    res.json({
+      success: true,
+      message: 'Connected with Galgotias LMS. Synchronizing your courses and assignments.',
+      data: { student: lmsPublicStudent },
+      student: lmsPublicStudent,
+    });
   } catch (err) {
-    logger.error('Logout error', { error: String(err) });
-    res.status(500).json({ error: 'Logout failed.' });
+    const statusCode = (err as { statusCode?: number }).statusCode || 500;
+    logger.error('Login error', { error: err instanceof Error ? err.message : String(err) });
+    res.status(statusCode).json({
+      error: statusCode === 503
+        ? 'Database service unavailable. Please check Supabase configuration.'
+        : 'Login failed due to a server error.',
+    });
   }
 });
 
-// ─── GET /verify-email ────────────────────────────────────────
+// ─── POST /demo (Explicit Demo Mode Entry) ───────────────────
+
+router.post('/demo', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const token = generateJwt(DEMO_STUDENT_ID, DEMO_EMAIL, {
+      isDemo: true,
+      authMode: 'demo',
+      rememberMe: false,
+    });
+    setSessionCookie(res, token, false);
+
+    const demoPublicStudent = buildStudentPublic(DEMO_STUDENT, {
+      isDemo: true,
+      authMode: 'demo',
+      lmsConnected: true,
+      lmsUsername: `${DEMO_ADMISSION_NUMBER} (Demo)`,
+      lmsExpiresAt: null,
+      lastSync: new Date().toISOString(),
+    });
+
+    res.json({
+      success: true,
+      message: 'Entered Demo Mode using sample demonstration data.',
+      data: { student: demoPublicStudent },
+      student: demoPublicStudent,
+    });
+  } catch (err) {
+    logger.error('Demo login error', { error: String(err) });
+    res.status(500).json({ error: 'Unable to enter Demo Mode.' });
+  }
+});
+
+// ─── POST /logout ────────────────────────────────────────────
+
+router.post('/logout', async (req: Request, res: Response): Promise<void> => {
+  const { disconnectLms } = (req.body || {}) as { disconnectLms?: boolean };
+
+  clearSessionCookie(res);
+
+  // Best-effort activity & optional LMS disconnect if JWT still identifiable
+  try {
+    const token =
+      req.cookies?.['campus_session'] ||
+      (req.headers.authorization?.startsWith('Bearer ')
+        ? req.headers.authorization.slice(7).trim()
+        : undefined);
+
+    if (token) {
+      const jwt = await import('jsonwebtoken');
+      const { getConfig } = await import('../config');
+      const decoded = jwt.verify(token, getConfig().jwtSecret) as { studentId?: string };
+      if (decoded.studentId && !isDemoStudent(decoded.studentId)) {
+        if (disconnectLms) {
+          await LMSSessions.deactivateAll(decoded.studentId);
+        }
+        await ActivityLogs.create({
+          studentId: decoded.studentId,
+          type: 'logout',
+          description: disconnectLms
+            ? 'Logged out and disconnected LMS session'
+            : 'Logged out of CampusSarthi session',
+        });
+      }
+    }
+  } catch {
+    // Token may already be expired; cookie still cleared cleanly
+  }
+
+  res.json({ message: 'Logged out successfully.' });
+});
+
+// ─── GET /verify-email ───────────────────────────────────────
 
 router.get('/verify-email', async (req: Request, res: Response): Promise<void> => {
   try {
-    const token = req.query['token'] as string;
-    if (!token) {
+    const { token } = req.query;
+    if (!token || typeof token !== 'string') {
       res.status(400).json({ error: 'Verification token is required.' });
       return;
     }
@@ -344,47 +583,30 @@ router.get('/verify-email', async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    if (student.is_email_verified) {
-      res.json({ success: true, message: 'Email already verified. You can log in.' });
-      return;
-    }
-
     await Students.markEmailVerified(student.id);
-
-    logger.info('Email verified', { studentId: student.id });
-
-    // Redirect to login with success message
-    res.redirect(`${config.frontendUrl}/login?verified=1`);
+    res.json({ message: 'Email verified successfully.' });
   } catch (err) {
-    logger.error('Email verification failed', { error: String(err) });
-    res.status(500).json({ error: 'Verification failed. Please try again.' });
+    logger.error('Verify email error', { error: String(err) });
+    res.status(500).json({ error: 'Email verification failed.' });
   }
 });
 
-// ─── GET /me ──────────────────────────────────────────────────
+// ─── GET /me ─────────────────────────────────────────────────
 
 router.get('/me', requireAuth, async (req: Request, res: Response): Promise<void> => {
   try {
-    if (req.student?.id === DEMO_STUDENT_ID) {
-      const studentPayload = {
-        _id: DEMO_STUDENT.id,
-        id: DEMO_STUDENT.id,
-        admissionNumber: DEMO_STUDENT.admission_number,
-        email: DEMO_STUDENT.email,
-        name: DEMO_STUDENT.full_name ?? 'Aarav Sharma (Demo Student)',
-        emailVerified: DEMO_STUDENT.is_email_verified,
-        isEmailVerified: DEMO_STUDENT.is_email_verified,
+    if (req.student?.isDemo || isDemoStudent(req.student!.id)) {
+      const demoPublic = buildStudentPublic(DEMO_STUDENT, {
+        isDemo: true,
+        authMode: 'demo',
         lmsConnected: true,
-        lmsUsername: DEMO_STUDENT.admission_number,
-        createdAt: DEMO_STUDENT.created_at,
-        updatedAt: DEMO_STUDENT.updated_at,
-      };
+        lmsUsername: `${DEMO_ADMISSION_NUMBER} (Demo)`,
+        lastSync: new Date().toISOString(),
+      });
       res.json({
         success: true,
-        data: {
-          student: studentPayload,
-          ...studentPayload,
-        },
+        data: demoPublic,
+        student: demoPublic,
       });
       return;
     }
@@ -392,74 +614,129 @@ router.get('/me', requireAuth, async (req: Request, res: Response): Promise<void
     const student = await Students.findById(req.student!.id);
     if (!student) {
       clearSessionCookie(res);
-      res.status(401).json({ error: 'Student account not found.' });
+      res.status(404).json({ error: 'Student profile not found.' });
       return;
     }
 
-    const activeSession = await LMSSessions.findActiveByStudentId(student.id);
+    const [activeLms, latestSync] = await Promise.all([
+      LMSSessions.findActiveByStudentId(student.id),
+      SyncRecords.findLatestByStudentId(student.id),
+    ]);
 
-    const studentPayload = {
-      _id: student.id,
-      id: student.id,
-      admissionNumber: student.admission_number,
-      email: student.email,
-      name: student.full_name ?? student.email,
-      emailVerified: student.is_email_verified,
-      isEmailVerified: student.is_email_verified,
-      lmsConnected: Boolean(activeSession),
-      lmsUsername: activeSession?.lms_username,
-      createdAt: student.created_at,
-      updatedAt: student.updated_at,
-    };
+    const realPublic = buildStudentPublic(student, {
+      isDemo: false,
+      authMode: req.student?.authMode ?? 'lms',
+      lmsConnected: Boolean(activeLms),
+      lmsUsername: activeLms?.lms_username ?? null,
+      lmsExpiresAt: activeLms?.expires_at ?? null,
+      lastSync: latestSync?.completed_at ?? latestSync?.started_at ?? null,
+    });
 
     res.json({
       success: true,
-      data: {
-        student: studentPayload,
-        ...studentPayload,
-      },
+      data: realPublic,
+      student: realPublic,
     });
   } catch (err) {
-    logger.error('Get me failed', { error: String(err) });
-    res.status(500).json({ error: 'Failed to retrieve account information.' });
+    const statusCode = (err as { statusCode?: number }).statusCode || 500;
+    logger.error('Get /me error', { error: String(err) });
+    res.status(statusCode).json({ error: 'Failed to retrieve student profile.' });
   }
 });
 
-// ─── PUT /change-password ─────────────────────────────────────
+// ─── PUT /profile ────────────────────────────────────────────
 
-router.put(
-  '/change-password',
-  requireAuth,
-  validateBody(changePasswordSchema),
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { currentPassword, newPassword } = req.body as z.infer<typeof changePasswordSchema>;
+router.put('/profile', requireAuth, async (req: Request, res: Response): Promise<void> => {
+  try {
+    if (req.student?.isDemo || isDemoStudent(req.student!.id)) {
+      res.status(403).json({ error: 'Profile edits are disabled in Demo Mode.' });
+      return;
+    }
 
-      const student = await Students.findById(req.student!.id);
-      if (!student) {
-        res.status(404).json({ error: 'Student not found.' });
+    const { name, email } = req.body as { name?: string; email?: string };
+    if (email !== undefined && !isValidEmail(email)) {
+      res.status(400).json({ error: 'Please provide a valid email address.' });
+      return;
+    }
+
+    const updated = await Students.updateProfile(req.student!.id, {
+      fullName: name,
+      email,
+    });
+
+    if (!updated) {
+      res.status(404).json({ error: 'Student not found.' });
+      return;
+    }
+
+    const [activeLms, latestSync] = await Promise.all([
+      LMSSessions.findActiveByStudentId(updated.id),
+      SyncRecords.findLatestByStudentId(updated.id),
+    ]);
+
+    res.json({
+      message: 'Profile updated.',
+      student: buildStudentPublic(updated, {
+        isDemo: false,
+        authMode: req.student?.authMode ?? 'lms',
+        lmsConnected: Boolean(activeLms),
+        lmsUsername: activeLms?.lms_username ?? null,
+        lmsExpiresAt: activeLms?.expires_at ?? null,
+        lastSync: latestSync?.completed_at ?? latestSync?.started_at ?? null,
+      }),
+    });
+  } catch (err) {
+    logger.error('Profile update error', { error: String(err) });
+    res.status(500).json({ error: 'Failed to update profile.' });
+  }
+});
+
+// ─── POST /change-password ───────────────────────────────────
+
+router.post('/change-password', requireAuth, async (req: Request, res: Response): Promise<void> => {
+  try {
+    if (req.student?.isDemo || isDemoStudent(req.student!.id)) {
+      res.status(403).json({ error: 'Password changes are not allowed in Demo Mode.' });
+      return;
+    }
+
+    const { currentPassword, newPassword } = req.body as {
+      currentPassword?: string;
+      newPassword?: string;
+    };
+
+    if (!newPassword || newPassword.length < 8) {
+      res.status(400).json({ error: 'New CampusSarthi password must be at least 8 characters.' });
+      return;
+    }
+
+    const student = await Students.findById(req.student!.id);
+    if (!student) {
+      res.status(404).json({ error: 'Student not found.' });
+      return;
+    }
+
+    // Campus-password users must verify currentPassword; LMS-authenticated users can set an independent CampusSarthi password
+    if (req.student?.authMode === 'campus') {
+      if (!currentPassword) {
+        res.status(400).json({ error: 'Current password is required.' });
         return;
       }
-
       const valid = await verifyPassword(currentPassword, student.password_hash);
       if (!valid) {
         res.status(401).json({ error: 'Current password is incorrect.' });
         return;
       }
-
-      const newHash = await hashPassword(newPassword);
-      await Students.updatePassword(student.id, newHash);
-
-      // Clear session — force re-login
-      clearSessionCookie(res);
-
-      logger.info('Password changed', { studentId: student.id });
-      res.json({ success: true, message: 'Password changed. Please log in with your new password.' });
-    } catch (err) {
-      logger.error('Change password failed', { error: String(err) });
-      res.status(500).json({ error: 'Failed to change password.' });
     }
+
+    const newHash = await hashPassword(newPassword);
+    await Students.updatePassword(student.id, newHash);
+
+    res.json({ message: 'CampusSarthi application password updated successfully.' });
+  } catch (err) {
+    logger.error('Change password error', { error: String(err) });
+    res.status(500).json({ error: 'Failed to change password.' });
   }
-);
+});
 
 export default router;

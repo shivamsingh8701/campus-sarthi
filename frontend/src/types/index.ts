@@ -1,16 +1,22 @@
 // ─── Core Domain Types ───────────────────────────────────────────────────────
 
+export type AuthMode = 'lms' | 'campus' | 'demo';
+
 export interface Student {
   _id?: string;
   id?: string;
   admissionNumber: string;
   email: string;
   name?: string;
+  fullName?: string | null;
   emailVerified?: boolean;
   isEmailVerified?: boolean;
+  isDemo?: boolean;
+  authMode?: AuthMode;
   lmsConnected?: boolean;
-  lmsUsername?: string;
-  lastSync?: string;
+  lmsUsername?: string | null;
+  lmsExpiresAt?: string | null;
+  lastSync?: string | null;
   createdAt: string;
   updatedAt?: string;
 }
@@ -30,13 +36,80 @@ export interface Course {
   updatedAt?: string;
 }
 
-export type AssignmentStatus = 'pending' | 'processing' | 'completed' | 'failed';
+export type AssignmentStatus =
+  | 'pending'
+  | 'discovering_attachments'
+  | 'downloading'
+  | 'download_failed'
+  | 'validating_document'
+  | 'extracting'
+  | 'extraction_failed'
+  | 'extracted'
+  | 'generating_solution'
+  | 'verifying_solution'
+  | 'generating_pdf'
+  | 'processing'
+  | 'completed'
+  | 'failed';
 
 export interface AssignmentAttachment {
   filename: string;
   url: string;
   mimeType?: string;
   size?: number;
+  fileSize?: number;
+}
+
+export interface OriginalDocumentMeta {
+  index: number;
+  filename: string;
+  originalUrl: string;
+  format: 'pdf' | 'docx' | 'doc' | 'txt' | 'other';
+  mimeType: string;
+  sizeBytes: number;
+  pageCount: number | null;
+  downloadStatus: 'downloaded' | 'validated' | 'failed';
+  validationError?: string | null;
+  downloadedAt: string;
+}
+
+export interface DetectedQuestionMeta {
+  id: string;
+  numberLabel: string;
+  questionText: string;
+  subquestions: string[];
+  sourcePage: number | null;
+  sourceFilename?: string;
+  marksHint?: string | null;
+  requiresVisualContext?: boolean;
+}
+
+export interface ExtractedContentMeta {
+  status: 'pending' | 'extracting' | 'extracted' | 'failed';
+  documentTitle?: string | null;
+  totalPages: number;
+  charCount: number;
+  extractionConfidence: 'high' | 'medium' | 'low';
+  warnings: string[];
+  visualFlags: string[];
+  requiresVisualProcessing: boolean;
+  instructions?: string | null;
+  rawTextPreview: string;
+  detectedQuestions: DetectedQuestionMeta[];
+  extractedAt: string;
+  error?: string | null;
+}
+
+export interface SolutionMeta {
+  summary: string;
+  questionsCount: number;
+  providerUsed: string;
+  verificationProvider?: string | null;
+  verificationApplied: boolean;
+  verificationNotes?: string | null;
+  generatedAt: string;
+  documentId?: string;
+  documentFilename?: string;
 }
 
 export interface Assignment {
@@ -44,17 +117,26 @@ export interface Assignment {
   id?: string;
   studentId: string;
   courseId: string;
+  courseName?: string;
   course?: Course;
   lmsAssignmentId: string;
   title: string;
   description?: string;
   dueDate?: string;
+  submissionStatus?: string;
   submittedAt?: string;
   attachments: AssignmentAttachment[];
   aiStatus: AssignmentStatus;
+  processingStage?: string;
+  requiresReauth?: boolean;
+  originalDocuments?: OriginalDocumentMeta[];
+  extractedContent?: ExtractedContentMeta | null;
+  solutionMeta?: SolutionMeta | null;
   documentId?: string;
+  document?: Document | null;
   emailSent?: boolean;
   emailSentAt?: string;
+  emailStatus?: string;
   questionsExtracted?: string[];
   errorMessage?: string;
   createdAt: string;
@@ -182,8 +264,13 @@ export interface AuthState {
 }
 
 export interface LoginCredentials {
-  email: string;
+  identifier?: string;
+  admissionNumber?: string;
+  email?: string;
   password: string;
+  rememberMe?: boolean;
+  mode?: 'lms' | 'campus';
+  name?: string;
 }
 
 export interface RegisterCredentials {
@@ -192,6 +279,20 @@ export interface RegisterCredentials {
   email: string;
   password: string;
   confirmPassword: string;
+  authType?: 'lms' | 'campus';
+}
+
+export interface IntegrationCheck {
+  id: 'lms' | 'gemini' | 'openai' | 'email' | 'supabase';
+  name: string;
+  state: 'connected' | 'reachable' | 'unconfigured' | 'disconnected' | 'error';
+  healthy: boolean;
+  configured: boolean;
+  latencyMs?: number;
+  lastCheckedAt: string;
+  detail: string;
+  error?: string;
+  meta?: Record<string, unknown>;
 }
 
 export interface AuthResponse {

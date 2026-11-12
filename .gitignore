@@ -9,3 +9,5 @@ tmp/
 
 node_modules
 dist/
+backend/storage/documents/
+backend/storage/pipeline_state.json

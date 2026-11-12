@@ -49,8 +49,16 @@ router.post(
 
     logger.info('LMS connect attempt', { studentId, username });
 
-    // ONLY use static sample data if explicitly using demo credentials
-    if (username === DEMO_ADMISSION_NUMBER && password === DEMO_LMS_PASSWORD) {
+    // Demo Mode only allowed for authenticated Demo user
+    if (isDemoStudent(studentId) || (username === DEMO_ADMISSION_NUMBER && password === DEMO_LMS_PASSWORD)) {
+      if (!isDemoStudent(studentId)) {
+        res.status(400).json({
+          success: false,
+          error: 'Demo credentials cannot be connected to a real student account.',
+        });
+        return;
+      }
+
       await LMSSessions.deactivateAll(studentId);
       await LMSSessions.create({
         studentId,
@@ -81,8 +89,18 @@ router.post(
       const result = await connector.login(username, password);
 
       if (!result.success) {
-        res.status(401).json({
+        const statusCode =
+          result.status === 'requires_verification' || result.status === 'account_disabled'
+            ? 403
+            : result.status === 'lms_unavailable'
+            ? 503
+            : result.status === 'page_changed'
+            ? 502
+            : 401;
+        res.status(statusCode).json({
           success: false,
+          code: result.status?.toUpperCase() || 'INVALID_LMS_CREDENTIALS',
+          verificationType: result.verificationType,
           error: result.errorMessage ?? 'LMS login failed. Check your university credentials.',
         });
         return;
@@ -169,26 +187,31 @@ router.post(
   }
 );
 
-// ─── DELETE /disconnect ───────────────────────────────────────
+// ─── DELETE / POST /disconnect ─────────────────────────────────
 
-router.delete('/disconnect', requireAuth, async (req: Request, res: Response): Promise<void> => {
+async function handleDisconnect(req: Request, res: Response): Promise<void> {
   try {
     const studentId = req.student!.id;
     await LMSSessions.deactivateAll(studentId);
 
-    await ActivityLogs.create({
-      studentId,
-      type: 'lms_disconnected',
-      description: 'LMS account disconnected',
-      metadata: {},
-    });
+    if (!isDemoStudent(studentId)) {
+      await ActivityLogs.create({
+        studentId,
+        type: 'lms_disconnected',
+        description: 'LMS account disconnected',
+        metadata: {},
+      });
+    }
 
     res.json({ success: true, message: 'LMS account disconnected.' });
   } catch (err) {
     logger.error('LMS disconnect error', { error: String(err) });
     res.status(500).json({ error: 'Failed to disconnect LMS account.' });
   }
-});
+}
+
+router.delete('/disconnect', requireAuth, handleDisconnect);
+router.post('/disconnect', requireAuth, handleDisconnect);
 
 // ─── GET /status ──────────────────────────────────────────────
 
@@ -204,9 +227,11 @@ router.get('/status', requireAuth, async (req: Request, res: Response): Promise<
         success: true,
         data: {
           connected: true,
+          isDemo: isDemoStudent(studentId),
           username: session.lms_username,
           loggedInAt: session.logged_in_at,
           lastUsedAt: session.last_used_at,
+          expiresAt: session.expires_at,
           lastSync: latestSync
             ? {
                 startedAt: latestSync.started_at,
@@ -215,15 +240,9 @@ router.get('/status', requireAuth, async (req: Request, res: Response): Promise<
                 coursesFound: latestSync.courses_found,
                 assignmentsFound: latestSync.assignments_found,
                 quizzesFound: latestSync.quizzes_found,
+                errors: latestSync.errors,
               }
-            : {
-                startedAt: session.logged_in_at,
-                completedAt: session.logged_in_at,
-                status: 'completed',
-                coursesFound: 0,
-                assignmentsFound: 0,
-                quizzesFound: 0,
-              },
+            : null,
         },
       });
       return;

@@ -88,6 +88,41 @@ export class LMSConnector {
     this.timeout = options.timeout ?? 45_000;
   }
 
+  static async probeReachability(timeoutMs = 7000): Promise<{
+    reachable: boolean;
+    statusCode?: number;
+    latencyMs: number;
+    hasLoginForm?: boolean;
+    error?: string;
+  }> {
+    const start = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(LOGIN_URL, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: { 'User-Agent': 'CampusSarthi-HealthProbe/1.0' },
+      });
+      const html = await res.text();
+      const hasLoginForm = html.includes('id="login"') || html.includes('name="logintoken"');
+      return {
+        reachable: res.ok && hasLoginForm,
+        statusCode: res.status,
+        latencyMs: Date.now() - start,
+        hasLoginForm,
+      };
+    } catch (err) {
+      return {
+        reachable: false,
+        latencyMs: Date.now() - start,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   async launch(): Promise<void> {
@@ -123,7 +158,10 @@ export class LMSConnector {
   async close(): Promise<void> {
     logger.info('Closing LMS browser');
     try {
-      if (this.context) await this.context.close();
+      if (this.context) {
+        await this.context.clearCookies().catch(() => {});
+        await this.context.close();
+      }
       if (this.browser) await this.browser.close();
     } catch {
       // Ignored
@@ -138,47 +176,286 @@ export class LMSConnector {
 
   async login(username: string, password: string): Promise<LoginResult> {
     const page = this.getPage();
-    logger.info('Navigating to LMS login page', { url: LOGIN_URL });
+    logger.info('Navigating to Galgotias LMS login page', { url: LOGIN_URL });
 
     try {
-      await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: this.timeout });
-      await page.waitForSelector(SEL.usernameInput, { timeout: this.timeout });
+      const response = await page
+        .goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: this.timeout })
+        .catch((err) => {
+          throw new Error(`LMS_NETWORK_ERROR: ${err instanceof Error ? err.message : String(err)}`);
+        });
 
-      // Fill credentials
-      await page.fill(SEL.usernameInput, username);
+      if (response && response.status() >= 500) {
+        return {
+          success: false,
+          status: 'lms_unavailable',
+          errorMessage: `Galgotias LMS returned HTTP ${response.status()}. The university portal may be experiencing downtime.`,
+        };
+      }
+
+      // Inspect login page state before interaction
+      const preCheck = await page.evaluate(() => {
+        const bodyText = (document.body?.innerText || '').toLowerCase();
+        const form = document.querySelector('form#login');
+        const userInput = document.querySelector('#username, input[name="username"]');
+        const passInput = document.querySelector('#password, input[name="password"]');
+        const submitBtn = document.querySelector('#loginbtn, button[type="submit"]');
+        const loginTokenEl = document.querySelector('form#login input[name="logintoken"], input[name="logintoken"]') as HTMLInputElement | null;
+        const captchaEl = document.querySelector(
+          'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"], .g-recaptcha, .h-captcha, #recaptcha, [name*="captcha"]'
+        );
+        const maintenance =
+          Boolean(document.querySelector('.maintenance, #notice.maintenance')) ||
+          bodyText.includes('site is currently undergoing maintenance') ||
+          bodyText.includes('scheduled maintenance');
+
+        return {
+          hasForm: Boolean(form),
+          hasUserInput: Boolean(userInput),
+          hasPassInput: Boolean(passInput),
+          hasSubmitBtn: Boolean(submitBtn),
+          hasLoginToken: Boolean(loginTokenEl?.value),
+          hasCaptcha: Boolean(captchaEl),
+          maintenance,
+        };
+      });
+
+      if (preCheck.maintenance) {
+        return {
+          success: false,
+          status: 'lms_unavailable',
+          errorMessage: 'Galgotias LMS is currently undergoing scheduled maintenance. Please try again later.',
+        };
+      }
+
+      if (preCheck.hasCaptcha) {
+        logger.warn('CAPTCHA detected on Galgotias LMS login page');
+        return {
+          success: false,
+          status: 'requires_verification',
+          verificationType: 'captcha',
+          errorMessage:
+            'Galgotias LMS is requesting a CAPTCHA verification. Please sign in directly on the university portal first and reconnect once verified.',
+        };
+      }
+
+      if (!preCheck.hasUserInput || !preCheck.hasPassInput || !preCheck.hasSubmitBtn) {
+        logger.error('Galgotias LMS login page structure changed', preCheck);
+        return {
+          success: false,
+          status: 'page_changed',
+          errorMessage:
+            'Galgotias LMS login page layout appears to have changed. Please contact support or try reconnecting later.',
+        };
+      }
+
+      logger.info('Galgotias LMS login form verified', {
+        hasForm: preCheck.hasForm,
+        hasLoginToken: preCheck.hasLoginToken,
+      });
+
+      // Fill exact Moodle form inputs and submit
+      await page.fill(SEL.usernameInput, username.trim());
       await page.fill(SEL.passwordInput, password);
 
-      // Click login and wait for navigation
       await Promise.all([
         page.waitForNavigation({ timeout: this.timeout, waitUntil: 'domcontentloaded' }).catch(() => {}),
         page.click(SEL.loginBtn),
       ]);
 
-      await page.waitForTimeout(3000);
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      await page
+        .waitForSelector(
+          `${SEL.loginError}, ${SEL.userMenu}, #page-my-index, nav.navbar a[href*="logout.php"], form#login`,
+          { timeout: 8000 }
+        )
+        .catch(() => {});
 
-      const currentUrl = page.url();
-      logger.info('Post-login URL', { url: currentUrl });
+      const postCheck = await page.evaluate(() => {
+        const url = window.location.href;
+        const bodyText = (document.body?.innerText || '').trim();
+        const lowerBody = bodyText.toLowerCase();
 
-      // PRIMARY CHECK: If we're still on the login page, login failed
-      if (currentUrl.includes('/login/index.php')) {
-        const errorEl = await page.$('#loginerrormessage, .loginerrors');
-        if (errorEl) {
-          const errorText = await errorEl.textContent();
-          logger.warn('LMS login failed (error element)', { error: errorText });
-          return { success: false, errorMessage: errorText?.trim() ?? 'Invalid login credentials' };
+        const loginFormVisible = Boolean(
+          document.querySelector('form#login #username, form#login #password')
+        );
+        const errorEl = document.querySelector('#loginerrormessage, .loginerrors, .alert-danger');
+        const errorText = errorEl?.textContent?.trim() || '';
+
+        const hasCaptcha = Boolean(
+          document.querySelector(
+            'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"], .g-recaptcha, [name*="captcha"]'
+          )
+        );
+
+        const hasOtpOrMfa =
+          url.includes('/auth/') ||
+          url.includes('/mfa') ||
+          lowerBody.includes('one-time password') ||
+          lowerBody.includes('verification code') ||
+          lowerBody.includes('enter otp') ||
+          lowerBody.includes('two-factor');
+
+        const hasPolicyGate =
+          url.includes('/admin/tool/policy') ||
+          lowerBody.includes('site policy') && lowerBody.includes('agree');
+
+        const w = window as unknown as { M?: { cfg?: { sesskey?: string; userid?: number } } };
+        const hasSesskey = Boolean(w.M?.cfg?.sesskey);
+        const hasLogoutLink = Boolean(document.querySelector('a[href*="login/logout.php"]'));
+        const hasUserMenu = Boolean(
+          document.querySelector('.usermenu, [data-region="user-menu"], [data-region="usermenu"], #action-menu-toggle-0')
+        );
+        const hasDashboardRoot = Boolean(
+          document.querySelector('#page-my-index, #page-my-courses, #page-site-index.pagelayout-frontpage')
+        );
+        const loggedOutText =
+          lowerBody.includes('you are not logged in') ||
+          lowerBody.includes('your session has timed out');
+
+        // Attempt to extract authenticated student's display name cleanly
+        let studentName = '';
+        const userTextEl = document.querySelector('.usertext, .usermenu .userbutton, [data-region="usermenu"] .avatar');
+        if (userTextEl?.textContent?.trim()) {
+          studentName = userTextEl.textContent.trim();
         }
-        const bodyText = await page.textContent('body');
-        const hasError = bodyText?.toLowerCase().includes('invalid login');
-        logger.warn('LMS login failed (still on login page)', { hasError });
+        if (!studentName) {
+          const heading = document.querySelector('#page-header h1, #page-header h2, .page-header-headings h1');
+          const hText = heading?.textContent?.trim() || '';
+          const hiMatch = hText.match(/^(?:Hi|Welcome back|Welcome),?\s+(.+?)[!.]?$/i);
+          if (hiMatch && hiMatch[1]) studentName = hiMatch[1].trim();
+        }
+        const userIdAttr =
+          document.querySelector('[data-userid]')?.getAttribute('data-userid') ||
+          (w.M?.cfg?.userid ? String(w.M.cfg.userid) : '');
+
+        return {
+          url,
+          loginFormVisible,
+          errorText,
+          lowerBody,
+          hasCaptcha,
+          hasOtpOrMfa,
+          hasPolicyGate,
+          hasSesskey,
+          hasLogoutLink,
+          hasUserMenu,
+          hasDashboardRoot,
+          loggedOutText,
+          studentName,
+          userIdAttr,
+        };
+      });
+
+      logger.info('Post-login multi-indicator inspection', {
+        url: postCheck.url,
+        loginFormVisible: postCheck.loginFormVisible,
+        hasSesskey: postCheck.hasSesskey,
+        hasLogoutLink: postCheck.hasLogoutLink,
+        hasUserMenu: postCheck.hasUserMenu,
+        hasDashboardRoot: postCheck.hasDashboardRoot,
+        hasCaptcha: postCheck.hasCaptcha,
+        hasOtpOrMfa: postCheck.hasOtpOrMfa,
+      });
+
+      if (postCheck.hasCaptcha) {
         return {
           success: false,
-          errorMessage: hasError
-            ? 'Invalid login, please check your university admission number and password.'
-            : 'Login failed — could not access Galgotias LMS dashboard.',
+          status: 'requires_verification',
+          verificationType: 'captcha',
+          errorMessage:
+            'Galgotias LMS requested CAPTCHA verification. Please log in directly on gulms.galgotiasuniversity.org and retry.',
         };
       }
 
-      logger.info('LMS login: successfully redirected to student portal');
+      if (postCheck.hasOtpOrMfa) {
+        return {
+          success: false,
+          status: 'requires_verification',
+          verificationType: 'otp',
+          errorMessage:
+            'Galgotias LMS is requesting OTP / multi-factor verification. Complete verification on the official portal first.',
+        };
+      }
+
+      if (postCheck.hasPolicyGate) {
+        return {
+          success: false,
+          status: 'requires_verification',
+          verificationType: 'policy',
+          errorMessage:
+            'Galgotias LMS requires accepting an updated university policy before portal access. Please sign in directly on the LMS once to accept it.',
+        };
+      }
+
+      const combinedError = (postCheck.errorText || '').toLowerCase();
+      if (
+        combinedError.includes('suspended') ||
+        combinedError.includes('disabled') ||
+        combinedError.includes('locked') ||
+        postCheck.lowerBody.includes('account is suspended') ||
+        postCheck.lowerBody.includes('too many failed login attempts')
+      ) {
+        return {
+          success: false,
+          status: 'account_disabled',
+          errorMessage:
+            postCheck.errorText ||
+            'Your Galgotias LMS account appears temporarily locked or disabled. Please contact university IT support.',
+        };
+      }
+
+      if (
+        postCheck.url.includes('/login/index.php') ||
+        postCheck.loginFormVisible ||
+        postCheck.errorText ||
+        postCheck.loggedOutText
+      ) {
+        const isInvalid =
+          combinedError.includes('invalid login') ||
+          postCheck.lowerBody.includes('invalid login');
+        return {
+          success: false,
+          status: 'invalid_credentials',
+          errorMessage:
+            postCheck.errorText ||
+            (isInvalid
+              ? 'Invalid Galgotias LMS admission number or password. Please verify your credentials.'
+              : 'Galgotias LMS did not establish an authenticated session.'),
+        };
+      }
+
+      // Independent positive confirmation of authenticated Moodle portal
+      const positiveSignals = [
+        postCheck.hasSesskey,
+        postCheck.hasLogoutLink,
+        postCheck.hasUserMenu,
+        postCheck.hasDashboardRoot,
+      ].filter(Boolean).length;
+
+      if (positiveSignals < 2) {
+        // Double-check dashboard explicitly to confirm genuine session access
+        await page.goto(DASHBOARD_URL, { waitUntil: 'domcontentloaded', timeout: this.timeout });
+        await page.waitForSelector(`${SEL.userMenu}, a[href*="login/logout.php"], form#login`, {
+          timeout: 6000,
+        }).catch(() => {});
+
+        const dashVerified = await page.evaluate(() => {
+          const url = window.location.href;
+          const formStillThere = Boolean(document.querySelector('form#login #username'));
+          const logoutLink = Boolean(document.querySelector('a[href*="login/logout.php"]'));
+          const userMenu = Boolean(document.querySelector('.usermenu, [data-region="user-menu"], [data-region="usermenu"]'));
+          return !url.includes('/login/index.php') && !formStillThere && (logoutLink || userMenu);
+        });
+
+        if (!dashVerified) {
+          return {
+            success: false,
+            status: 'invalid_credentials',
+            errorMessage: 'Unable to verify authenticated dashboard access on Galgotias LMS.',
+          };
+        }
+      }
 
       // Collect session cookies
       const rawCookies: Cookie[] = await this.context!.cookies();
@@ -193,12 +470,29 @@ export class LMSConnector {
         sameSite: c.sameSite,
       }));
 
-      logger.info('LMS login succeeded', { cookieCount: sessionCookies.length });
-      return { success: true, sessionCookies };
+      logger.info('LMS login verified via multi-indicator check', {
+        cookieCount: sessionCookies.length,
+        hasStudentName: Boolean(postCheck.studentName),
+      });
+
+      return {
+        success: true,
+        status: 'authenticated',
+        studentName: postCheck.studentName || undefined,
+        lmsUserId: postCheck.userIdAttr || undefined,
+        sessionCookies,
+      };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error('LMS login threw exception', { error: message });
-      return { success: false, errorMessage: `Login error: ${message}` };
+      if (message.startsWith('LMS_NETWORK_ERROR:') || message.includes('ERR_') || message.includes('Timeout')) {
+        return {
+          success: false,
+          status: 'lms_unavailable',
+          errorMessage: 'Could not reach Galgotias LMS (gulms.galgotiasuniversity.org). Check your network or university portal status.',
+        };
+      }
+      return { success: false, status: 'error', errorMessage: `Login error: ${message}` };
     }
   }
 
@@ -225,17 +519,36 @@ export class LMSConnector {
     const page = this.getPage();
     try {
       await page.goto(MY_COURSES_URL, { waitUntil: 'domcontentloaded', timeout: this.timeout });
-      await page.waitForTimeout(2000);
-      const url = page.url();
+      await page
+        .waitForSelector(`${SEL.userMenu}, a[href*="login/logout.php"], form#login`, { timeout: 6000 })
+        .catch(() => {});
 
-      if (url.includes('/login/index.php')) {
-        logger.info('Session validation failed — redirected to login');
+      const status = await page.evaluate(() => {
+        const url = window.location.href;
+        const bodyLower = (document.body?.innerText || '').toLowerCase();
+        const hasLoginForm = Boolean(document.querySelector('form#login #username'));
+        const hasLogoutLink = Boolean(document.querySelector('a[href*="login/logout.php"]'));
+        const hasUserMenu = Boolean(
+          document.querySelector('.usermenu, [data-region="user-menu"], [data-region="usermenu"]')
+        );
+        return { url, bodyLower, hasLoginForm, hasLogoutLink, hasUserMenu };
+      });
+
+      if (status.url.includes('/login/index.php') || status.hasLoginForm) {
+        logger.info('Session validation failed — login form or login URL present');
         return false;
       }
 
-      const bodyText = (await page.textContent('body')) || '';
-      if (bodyText.includes('Your session has timed out') || bodyText.includes('Log in to ActiLearn')) {
+      if (
+        status.bodyLower.includes('your session has timed out') ||
+        status.bodyLower.includes('you are not logged in')
+      ) {
         logger.info('Session validation failed — session timed out');
+        return false;
+      }
+
+      if (!status.hasLogoutLink && !status.hasUserMenu) {
+        logger.info('Session validation failed — authenticated Moodle navigation absent');
         return false;
       }
 
@@ -705,7 +1018,7 @@ export class LMSConnector {
   }
 
   // ── Assignment Details ────────────────────────────────────────────────────
-  // Extracts detailed assignment view, attachment docx, due dates (Screenshot 5)
+  // Extracts detailed assignment view, attachment docx/pdf/doc, due dates
 
   async getAssignmentDetails(assignmentUrl: string): Promise<AssignmentDetails> {
     const page = this.getPage();
@@ -714,16 +1027,45 @@ export class LMSConnector {
     await page.goto(assignmentUrl, { waitUntil: 'domcontentloaded', timeout: this.timeout });
     await page.waitForTimeout(1500);
 
+    // Detect expired Moodle session immediately before scraping
+    const currentUrl = page.url();
+    const hasLoginForm = (await page.$('input[name="logintoken"], #loginbtn, form[action*="login/index.php"]')) !== null;
+    if (currentUrl.includes('/login/') || hasLoginForm) {
+      throw new LMSSessionExpiredError(
+        'Your Galgotias LMS session has expired. Please reconnect your LMS account and retry.'
+      );
+    }
+
     const lmsAssignmentId = extractIdFromUrl(assignmentUrl, 'id');
 
-    // Title (Screenshot 5: "Home Assignment 2 (CO3)")
+    // Title
     const title =
       (await page.textContent('h2, .page-header-headings h1, h1.h2'))?.trim() ??
       'Untitled Assignment';
 
-    // Description
-    const descEl = await page.$('#intro, .box.generalbox.intro, [data-region="assign-intro"]');
-    const description = descEl ? (await descEl.textContent())?.trim() ?? null : null;
+    // Description & instructions (combining intro + activity description regions)
+    const descBlocks = await page.evaluate(() => {
+      const selectors = [
+        '#intro',
+        '.box.generalbox.intro',
+        '[data-region="assign-intro"]',
+        '.activity-description',
+        '[data-region="activity-description"]',
+      ];
+      const parts: string[] = [];
+      const seenText = new Set<string>();
+      for (const sel of selectors) {
+        document.querySelectorAll(sel).forEach((el) => {
+          const txt = (el.textContent || '').trim();
+          if (txt && !seenText.has(txt)) {
+            seenText.add(txt);
+            parts.push(txt);
+          }
+        });
+      }
+      return parts.join('\n\n').trim();
+    });
+    const description = descBlocks || null;
 
     // Dates extraction:
     // In Moodle 4 (Screenshot 5), dates appear in `.activity-dates` or header text:
@@ -784,16 +1126,19 @@ export class LMSConnector {
       }> = [];
       const seen = new Set<string>();
 
-      // Broad selector catching Moodle 4 assign view links, intro attachments, and document files
+      // Broad selector catching Moodle 4 assign view links, intro attachments, resource links, and document files
       const candidateSelectors = [
         'a[href*="/pluginfile.php/"]',
         'a[href*="/mod_assign/introattachment/"]',
         'a[href*="/mod_assign/intro/"]',
+        'a[href*="forcedownload=1"]',
+        'a[href*="/mod/resource/view.php"]',
         'a[href*=".docx"]',
         'a[href*=".doc"]',
         'a[href*=".pdf"]',
         'a[href*=".txt"]',
         '.fileuploadsubmission a',
+        '.attachments a',
         '[data-region="activity-information"] a',
         '.activity-information a',
         '.intro a',
@@ -991,59 +1336,155 @@ export class LMSConnector {
   }
   // ── File Download ────────────────────────────────────────────────────────
 
-  async downloadFile(fileUrl: string, destPath: string): Promise<string> {
+  async downloadFileBuffer(fileUrl: string): Promise<{
+    buffer: Buffer;
+    filename: string;
+    mimeType: string;
+    finalUrl: string;
+  }> {
     const page = this.getPage();
-    logger.info('Downloading file from LMS', { url: fileUrl, destPath });
-
-    const dir = path.dirname(destPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    logger.info('Downloading authentic file from LMS', { url: fileUrl });
 
     const fullUrl = fileUrl.startsWith('http://') || fileUrl.startsWith('https://')
       ? fileUrl
       : `${LMS_BASE}${fileUrl.startsWith('/') ? '' : '/'}${fileUrl}`;
 
-    // Method 1: authenticated request context
-    try {
-      const response = await page.request.get(fullUrl);
-      const contentType = response.headers()['content-type'] || '';
-      const finalUrl = response.url();
-
-      if (finalUrl.includes('/login/') || contentType.includes('text/html')) {
-        throw new Error('LMS session expired or redirected to university login page');
-      }
-
-      if (response.ok()) {
-        const buffer = await response.body();
-        if (buffer && buffer.length > 0) {
-          const head = buffer.subarray(0, 50).toString('utf-8').toLowerCase();
-          if (head.includes('<!doctype html') || head.includes('<html')) {
-            throw new Error('Received HTML instead of binary document (session timed out)');
-          }
-
-          fs.writeFileSync(destPath, buffer);
-          logger.info('File downloaded successfully via page.request', { destPath, size: buffer.length });
-          return destPath;
+    const parseContentDispositionFilename = (header?: string): string | null => {
+      if (!header) return null;
+      const utf8Match = header.match(/filename\*=UTF-8''([^;\n]+)/i);
+      if (utf8Match && utf8Match[1]) {
+        try {
+          return decodeURIComponent(utf8Match[1].trim().replace(/['"]/g, ''));
+        } catch {
+          return utf8Match[1].trim().replace(/['"]/g, '');
         }
       }
+      const basicMatch = header.match(/filename="?([^";\n]+)"?/i);
+      return basicMatch && basicMatch[1] ? basicMatch[1].trim() : null;
+    };
+
+    const inferUrlFilename = (targetUrl: string): string => {
+      try {
+        const clean = decodeURIComponent(targetUrl.split('?')[0] || '');
+        return (clean.split('/').pop() || 'assignment_document').replace(/[\\/:*?"<>|]/g, '_');
+      } catch {
+        return 'assignment_document';
+      }
+    };
+
+    // Method 1: Authenticated Playwright APIRequestContext sharing browser session cookies
+    try {
+      const response = await page.request.get(fullUrl, { maxRedirects: 5, timeout: 30000 });
+      const contentType = response.headers()['content-type'] || '';
+      const contentDisposition = response.headers()['content-disposition'] || '';
+      const finalUrl = response.url();
+
+      if (finalUrl.includes('/login/') || contentType.toLowerCase().includes('text/html')) {
+        // Double-check if response body is actually a login page
+        const preview = (await response.body()).subarray(0, 2048).toString('utf-8').toLowerCase();
+        if (preview.includes('/login/index.php') || preview.includes('logintoken') || preview.includes('<html')) {
+          throw new LMSSessionExpiredError(
+            'LMS session expired or redirected to login page while downloading attachment.'
+          );
+        }
+      }
+
+      if (!response.ok()) {
+        throw new Error(`LMS returned HTTP ${response.status()} for attachment`);
+      }
+
+      const buffer = await response.body();
+      if (!buffer || buffer.length === 0) {
+        throw new Error('Downloaded attachment was empty (0 bytes)');
+      }
+
+      const head = buffer.subarray(0, 120).toString('utf-8').trimStart().toLowerCase();
+      if (head.startsWith('<!doctype html') || head.startsWith('<html')) {
+        throw new LMSSessionExpiredError(
+          'Received HTML login/error page instead of attachment file.'
+        );
+      }
+
+      const detectedFilename =
+        parseContentDispositionFilename(contentDisposition) || inferUrlFilename(finalUrl || fullUrl);
+
+      logger.info('File buffer downloaded via page.request', {
+        filename: detectedFilename,
+        size: buffer.length,
+        contentType,
+      });
+
+      return {
+        buffer,
+        filename: detectedFilename,
+        mimeType: contentType || 'application/octet-stream',
+        finalUrl,
+      };
     } catch (apiErr) {
-      logger.warn('Direct request download failed, attempting browser download trigger', {
+      if (apiErr instanceof LMSSessionExpiredError) {
+        throw apiErr;
+      }
+      logger.warn('Direct authenticated request download failed, attempting browser download event', {
         error: String(apiErr),
       });
     }
 
-    // Method 2: Playwright download event trigger
+    // Method 2: Playwright browser download trigger (handles Moodle forcedownload/redirect scripts)
     try {
+      const tmpDownloadDir = path.join(process.env['TEMP'] ?? '/tmp', 'campussarthi', 'dl-stage');
+      fs.mkdirSync(tmpDownloadDir, { recursive: true });
+      const stagePath = path.join(tmpDownloadDir, `${Date.now()}_stage`);
+
       const [download] = await Promise.all([
-        page.waitForEvent('download', { timeout: 15000 }),
+        page.waitForEvent('download', { timeout: 20000 }),
         page.goto(fullUrl).catch(() => {}),
       ]);
-      await download.saveAs(destPath);
-      logger.info('File downloaded successfully via browser download event', { destPath });
-      return destPath;
+
+      await download.saveAs(stagePath);
+      const buffer = fs.readFileSync(stagePath);
+      fs.unlink(stagePath, () => {});
+
+      if (page.url().includes('/login/')) {
+        throw new LMSSessionExpiredError('LMS session expired during browser download redirect.');
+      }
+
+      const suggested = download.suggestedFilename() || inferUrlFilename(fullUrl);
+      logger.info('File buffer downloaded via browser download event', {
+        filename: suggested,
+        size: buffer.length,
+      });
+
+      return {
+        buffer,
+        filename: suggested,
+        mimeType: 'application/octet-stream',
+        finalUrl: download.url() || fullUrl,
+      };
     } catch (dlEventErr) {
+      if (dlEventErr instanceof LMSSessionExpiredError) {
+        throw dlEventErr;
+      }
+      if (page.url().includes('/login/')) {
+        throw new LMSSessionExpiredError('LMS session expired. Please reconnect your university account.');
+      }
       logger.error('All download methods failed', { url: fullUrl, error: String(dlEventErr) });
-      throw new Error(`Failed to download file from ${fullUrl}`);
+      throw new Error(`Failed to download authentic document from ${fullUrl}: ${String(dlEventErr)}`);
     }
+  }
+
+  async downloadFile(fileUrl: string, destPath: string): Promise<string> {
+    const dir = path.dirname(destPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const result = await this.downloadFileBuffer(fileUrl);
+    fs.writeFileSync(destPath, result.buffer);
+    return destPath;
+  }
+}
+
+export class LMSSessionExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LMSSessionExpiredError';
   }
 }
 

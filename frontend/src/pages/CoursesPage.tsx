@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { BookOpen, ExternalLink, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { formatDistanceToNow } from 'date-fns';
 import { TopBar } from '@/components/layout/TopBar';
 import { Card, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -23,16 +24,21 @@ export function CoursesPage() {
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <TopBar title="My Courses" onSync={handleSync} isSyncing={isLoading} />
-      <main className="flex-1 overflow-y-auto p-6 space-y-5">
-        <div className="flex items-center justify-between">
+      <TopBar
+        title="My Courses"
+        subtitle={`${courses.length} synchronized Galgotias LMS course${courses.length === 1 ? '' : 's'}`}
+        onSync={handleSync}
+        isSyncing={isLoading}
+      />
+      <main className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h1 className="text-lg font-semibold text-gray-900">Enrolled LMS Courses</h1>
-            <p className="text-xs text-gray-500">
-              Courses synchronized from your official Galgotias University LMS account.
+            <h2 className="text-lg font-semibold text-slate-900">Enrolled LMS Courses</h2>
+            <p className="text-xs text-slate-500">
+              Courses pulled directly from your active Galgotias University Moodle session.
             </p>
           </div>
-          <Button size="sm" variant="outline" onClick={handleSync} isLoading={isLoading} className="gap-2">
+          <Button size="sm" variant="outline" onClick={handleSync} isLoading={isLoading} className="gap-2 self-start sm:self-auto">
             <RefreshCw className="h-3.5 w-3.5" />
             Refresh Courses
           </Button>
@@ -47,22 +53,36 @@ export function CoursesPage() {
         ) : courses.length === 0 ? (
           <EmptyState
             icon={<BookOpen className="h-6 w-6" />}
-            title="No courses found"
-            description="Connect your Galgotias LMS account to fetch your enrolled university courses."
+            title="No courses synchronized"
+            description="Connect your Galgotias LMS account or trigger a sync to load enrolled courses."
           />
         ) : (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {courses.map((course) => {
+              const raw = course as unknown as {
+                courseUrl?: string;
+                shortName?: string;
+                lastSyncedAt?: string;
+              };
               const courseUrl =
-                (course as unknown as { courseUrl?: string })?.courseUrl ||
+                raw?.courseUrl ||
                 `https://gulms.galgotiasuniversity.org/course/view.php?id=${course.lmsCourseId}`;
+              const syncedAgo = raw?.lastSyncedAt
+                ? (() => {
+                    try {
+                      return formatDistanceToNow(new Date(raw.lastSyncedAt), { addSuffix: true });
+                    } catch {
+                      return null;
+                    }
+                  })()
+                : null;
 
               return (
-                <Card key={course._id || course.id || course.lmsCourseId} className="flex flex-col">
-                  <CardBody className="flex flex-1 flex-col gap-3">
+                <Card key={course._id || course.id || course.lmsCourseId} className="flex flex-col hover:border-slate-900/15">
+                  <CardBody className="flex flex-1 flex-col gap-3.5">
                     <div className="flex items-start justify-between gap-2">
-                      <div className="rounded-lg bg-indigo-50 p-2 text-indigo-600">
-                        <BookOpen className="h-5 w-5" />
+                      <div className="rounded-xl bg-indigo-50/90 border border-indigo-200/60 p-2 text-indigo-600">
+                        <BookOpen className="h-4 w-4" />
                       </div>
                       <Badge variant="success" className="gap-1">
                         <CheckCircle2 className="h-3 w-3" /> Enrolled
@@ -70,30 +90,33 @@ export function CoursesPage() {
                     </div>
 
                     <div className="space-y-1">
-                      <h3 className="font-semibold text-gray-900 text-sm line-clamp-2">
+                      <h3 className="font-semibold text-slate-900 text-sm line-clamp-2 leading-snug">
                         {course.name}
                       </h3>
-                      {course.code && (
-                        <p className="text-xs font-mono text-gray-500">{course.code}</p>
+                      {(course.code || raw.shortName) && (
+                        <p className="text-[11px] font-mono text-slate-500">
+                          {course.code || raw.shortName}
+                        </p>
                       )}
                     </div>
 
                     {course.instructor && (
-                      <p className="text-xs text-gray-500">
-                        Instructor: <span className="text-gray-700 font-medium">{course.instructor}</span>
+                      <p className="text-xs text-slate-500">
+                        Faculty: <span className="text-slate-700 font-medium">{course.instructor}</span>
                       </p>
                     )}
 
-                    <div className="mt-auto pt-3 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
-                      <span>LMS ID: {course.lmsCourseId}</span>
+                    <div className="mt-auto pt-3 border-t border-slate-900/[0.06] flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-slate-400">
+                        {syncedAgo ? `Synced ${syncedAgo}` : 'Active course'}
+                      </span>
                       <a
                         href={courseUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="flex items-center gap-1 font-medium text-indigo-600 hover:text-indigo-800"
+                        className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-700"
                       >
-                        Open on LMS
-                        <ExternalLink className="h-3 w-3" />
+                        Open LMS <ExternalLink className="h-3 w-3" />
                       </a>
                     </div>
                   </CardBody>
@@ -108,4 +131,3 @@ export function CoursesPage() {
 }
 
 export default CoursesPage;
-

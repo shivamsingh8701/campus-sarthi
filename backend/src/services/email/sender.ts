@@ -15,7 +15,9 @@ export interface AssignmentEmailParams {
   courseName: string;
   dueDate: Date | null;
   summary: string;
-  pdfPath: string;
+  pdfPath?: string;
+  pdfBuffer?: Buffer;
+  pdfFilename?: string;
   dashboardUrl: string;
 }
 
@@ -186,21 +188,27 @@ export class EmailSender {
   ): Promise<{ messageId: string; accepted: string[] }> {
     const cfg = getConfig();
 
-    if (!fs.existsSync(params.pdfPath)) {
-      throw new Error(`PDF attachment not found at: ${params.pdfPath}`);
+    const buffer =
+      params.pdfBuffer ??
+      (params.pdfPath && fs.existsSync(params.pdfPath) ? fs.readFileSync(params.pdfPath) : null);
+
+    if (!buffer || buffer.length === 0) {
+      throw new Error(`PDF attachment not found or empty for: ${params.assignmentTitle}`);
     }
 
-    const pdfFilename = `${params.assignmentTitle.replace(/[^a-z0-9]/gi, '_').slice(0, 40)}_solution.pdf`;
+    const pdfFilename =
+      params.pdfFilename ||
+      `CampusSarthi_${params.assignmentTitle.replace(/[^a-z0-9]+/gi, '_').slice(0, 48)}_Solution.pdf`;
 
     const mailOptions = {
       from: `"CampusSarthi" <${cfg.email.smtpUser}>`,
       to: params.to,
-      subject: `[CampusSarthi] Assignment Solution: ${params.assignmentTitle}`,
+      subject: `Your Assignment Solution Is Ready — ${params.assignmentTitle}`,
       html: assignmentEmailHtml(params),
       attachments: [
         {
           filename: pdfFilename,
-          path: params.pdfPath,
+          content: buffer,
           contentType: 'application/pdf',
         },
       ],
@@ -209,15 +217,17 @@ export class EmailSender {
     logger.info('Sending assignment solution email', {
       to: params.to,
       assignmentTitle: params.assignmentTitle,
+      pdfFilename,
+      sizeBytes: buffer.length,
     });
 
     const info: SentMessageInfo = await this.getTransporter().sendMail(mailOptions);
 
-    if (!info.accepted || info.accepted.length === 0) {
-      throw new Error(`Email was not accepted by the SMTP server. Response: ${info.response}`);
+    if (!info.accepted || info.accepted.length === 0 || !info.messageId) {
+      throw new Error(`Email was not accepted by the SMTP server. Response: ${info.response || 'No messageId returned'}`);
     }
 
-    logger.info('Assignment email sent', {
+    logger.info('Assignment email accepted by SMTP provider', {
       messageId: info.messageId,
       accepted: info.accepted,
     });

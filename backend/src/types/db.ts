@@ -42,6 +42,22 @@ export interface CourseRow {
   created_at: string;
 }
 
+export type AssignmentPipelineDbStatus =
+  | 'pending'
+  | 'discovering_attachments'
+  | 'downloading'
+  | 'download_failed'
+  | 'validating_document'
+  | 'extracting'
+  | 'extraction_failed'
+  | 'extracted'
+  | 'generating_solution'
+  | 'verifying_solution'
+  | 'generating_pdf'
+  | 'processing'
+  | 'completed'
+  | 'failed';
+
 export interface AssignmentRow {
   id: string;
   student_id: string;
@@ -54,12 +70,18 @@ export interface AssignmentRow {
   max_grade: number | null;
   submission_status: string | null;
   attachments: Array<{ url: string; filename: string; fileSize?: number; mimeType?: string }>;
-  ai_status: 'pending' | 'processing' | 'completed' | 'failed';
+  ai_status: AssignmentPipelineDbStatus;
   ai_error_message: string | null;
   ai_processed_at: string | null;
   document_id: string | null;
   email_sent_at: string | null;
   email_status: string | null;
+  processing_stage?: string | null;
+  original_documents?: unknown[] | null;
+  extracted_content?: Record<string, unknown> | null;
+  detected_questions?: unknown[] | null;
+  ai_provider_used?: string | null;
+  ai_verification_notes?: string | null;
   last_synced_at: string;
   created_at: string;
   updated_at: string;
@@ -91,6 +113,10 @@ export interface DocumentRow {
   filename: string;
   file_path: string;
   file_size_bytes: number | null;
+  document_kind?: 'original_assignment' | 'generated_solution';
+  mime_type?: string | null;
+  storage_bucket?: string | null;
+  storage_key?: string | null;
   generated_at: string;
   created_at: string;
 }

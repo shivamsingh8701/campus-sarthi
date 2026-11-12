@@ -3,6 +3,8 @@
 // ============================================================
 
 import express from 'express';
+import path from 'path';
+import fs from 'fs';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -20,11 +22,15 @@ import quizRoutes from './routes/quizzes';
 import documentRoutes from './routes/documents';
 import emailRoutes from './routes/email';
 import activityRoutes from './routes/activity';
+import integrationsRoutes from './routes/integrations';
 import aiRoutes from './routes/ai';
 
 export function createApp(): express.Application {
   const cfg = getConfig();
   const app = express();
+
+  // Trust reverse proxy headers (Railway, Render, Fly.io, Nginx)
+  app.set('trust proxy', 1);
 
   // ── Security ───────────────────────────────────────────────
   app.use(
@@ -34,9 +40,24 @@ export function createApp(): express.Application {
     })
   );
 
+  const allowedOrigins = new Set(
+    [
+      ...cfg.frontendUrl.split(',').map((o) => o.trim()).filter(Boolean),
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://localhost:4173',
+    ].filter(Boolean)
+  );
+
   app.use(
     cors({
-      origin: cfg.frontendUrl,
+      origin: (origin, callback) => {
+        if (!origin || allowedOrigins.has(origin) || (!cfg.isProduction && origin.startsWith('http://localhost:'))) {
+          callback(null, true);
+          return;
+        }
+        callback(new Error(`CORS origin denied: ${origin}`));
+      },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
@@ -76,7 +97,18 @@ export function createApp(): express.Application {
   app.use('/api/v1/documents', documentRoutes);
   app.use('/api/v1/email', emailRoutes);
   app.use('/api/v1/activity', activityRoutes);
+  app.use('/api/v1/integrations', integrationsRoutes);
   app.use('/api/v1/ai', aiRoutes);
+
+  // ── Serve Built Frontend (Single-Container Production Mode) ─
+  const frontendDist = path.resolve(__dirname, '..', '..', 'frontend', 'dist');
+  const frontendIndex = path.join(frontendDist, 'index.html');
+  if ((cfg.isProduction || process.env['SERVE_FRONTEND'] === 'true') && fs.existsSync(frontendIndex)) {
+    app.use(express.static(frontendDist));
+    app.get(/^(?!\/api\/|\/health$).*/, (_req, res) => {
+      res.sendFile(frontendIndex);
+    });
+  }
 
   // ── 404 Handler ────────────────────────────────────────────
   app.use((_req: import('express').Request, res: import('express').Response) => {

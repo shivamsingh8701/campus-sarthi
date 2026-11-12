@@ -43,6 +43,10 @@ export interface AppConfig {
   ai: {
     geminiApiKey: string;
     openaiApiKey: string;
+    geminiModel: string;
+    geminiProModel: string;
+    openaiModel: string;
+    openaiReasoningModel: string;
   };
 
   email: {
@@ -93,6 +97,10 @@ function buildConfig(): AppConfig {
     ai: {
       geminiApiKey: optionalEnv('GEMINI_API_KEY'),
       openaiApiKey: optionalEnv('OPENAI_API_KEY'),
+      geminiModel: optionalEnv('GEMINI_MODEL', 'gemini-3-flash-preview'),
+      geminiProModel: optionalEnv('GEMINI_PRO_MODEL', 'gemini-3-flash-preview'),
+      openaiModel: optionalEnv('OPENAI_MODEL', 'gpt-4o-mini'),
+      openaiReasoningModel: optionalEnv('OPENAI_REASONING_MODEL', 'gpt-4o'),
     },
 
     email: {

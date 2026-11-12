@@ -9,6 +9,7 @@ import CoursesPage from '@/pages/CoursesPage'
 import AssignmentsPage from '@/pages/AssignmentsPage'
 import AssignmentDetailPage from '@/pages/AssignmentDetailPage'
 import QuizzesPage from '@/pages/QuizzesPage'
+import SolutionsPage from '@/pages/SolutionsPage'
 import DocumentsPage from '@/pages/DocumentsPage'
 import ActivityPage from '@/pages/ActivityPage'
 import IntegrationsPage from '@/pages/IntegrationsPage'
@@ -69,6 +70,7 @@ export default function App() {
                   <Route path="/dashboard/assignments" element={<AssignmentsPage />} />
                   <Route path="/dashboard/assignments/:id" element={<AssignmentDetailPage />} />
                   <Route path="/dashboard/quizzes" element={<QuizzesPage />} />
+                  <Route path="/dashboard/solutions" element={<SolutionsPage />} />
                   <Route path="/dashboard/documents" element={<DocumentsPage />} />
                   <Route path="/dashboard/activity" element={<ActivityPage />} />
                   <Route path="/dashboard/integrations" element={<IntegrationsPage />} />

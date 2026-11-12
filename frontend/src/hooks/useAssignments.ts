@@ -28,19 +28,74 @@ export function useAssignments() {
     }
   }, []);
 
-  const getAssignment = useCallback(async (id: string) => {
-    setIsLoading(true);
+  const getAssignment = useCallback(async (id: string, opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setIsLoading(true);
     setError(null);
     try {
       const response = await assignmentsApi.getById(id);
       if (response.success) setAssignment(response.data);
     } catch (err: unknown) {
-      const e = err as { response?: { data?: { message?: string } } };
-      setError(e.response?.data?.message || 'Failed to load assignment');
+      const e = err as { response?: { data?: { message?: string; error?: string } } };
+      setError(e.response?.data?.error || e.response?.data?.message || 'Failed to load assignment');
     } finally {
-      setIsLoading(false);
+      if (!opts?.silent) setIsLoading(false);
     }
   }, []);
+
+  const extractDocument = useCallback(async (id: string, force = false) => {
+    setError(null);
+    try {
+      const response = await assignmentsApi.extractDocument(id, force);
+      return {
+        success: response.success,
+        message: response.message,
+        requiresReauth: false,
+      };
+    } catch (err: unknown) {
+      const e = err as {
+        response?: { data?: { error?: string; message?: string; requiresReauth?: boolean } };
+        message?: string;
+      };
+      const message =
+        e.response?.data?.error || e.response?.data?.message || e.message || 'Document extraction failed';
+      setError(message);
+      return {
+        success: false,
+        message,
+        requiresReauth: Boolean(e.response?.data?.requiresReauth),
+      };
+    }
+  }, []);
+
+  const generateSolution = useCallback(async (id: string, forceExtract = false) => {
+    setError(null);
+    try {
+      const response = await assignmentsApi.generateSolution(id, forceExtract);
+      return { success: response.success, message: response.message };
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { error?: string; message?: string } }; message?: string };
+      const message =
+        e.response?.data?.error || e.response?.data?.message || e.message || 'Failed to start solution generation';
+      setError(message);
+      return { success: false, message };
+    }
+  }, []);
+
+  const uploadDocument = useCallback(
+    async (id: string, filename: string, fileBase64: string, autoGenerate = false) => {
+      setError(null);
+      try {
+        const response = await assignmentsApi.uploadDocument(id, filename, fileBase64, autoGenerate);
+        return { success: response.success, message: response.message };
+      } catch (err: unknown) {
+        const e = err as { response?: { data?: { error?: string; message?: string } }; message?: string };
+        const message = e.response?.data?.error || e.response?.data?.message || e.message || 'Upload failed';
+        setError(message);
+        return { success: false, message };
+      }
+    },
+    []
+  );
 
   const analyzeAssignment = useCallback(async (id: string) => {
     setIsLoading(true);
@@ -109,6 +164,9 @@ export function useAssignments() {
     pagination,
     getAssignments,
     getAssignment,
+    extractDocument,
+    generateSolution,
+    uploadDocument,
     analyzeAssignment,
     solveAllAssignments,
     getAssignmentDocument,

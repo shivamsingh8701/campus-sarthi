@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { User, Link, Mail, Cpu, Shield } from 'lucide-react';
+import { User, Link, Mail, Cpu, Shield, CheckCircle2, AlertCircle } from 'lucide-react';
 import { TopBar } from '@/components/layout/TopBar';
 import { Card, CardHeader, CardBody } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { Badge } from '@/components/ui/Badge';
 import { StatusIndicator } from '@/components/ui/StatusIndicator';
 import { LMSConnectModal } from '@/components/auth/LMSConnectModal';
 import { useAuth } from '@/store/authStore';
@@ -32,17 +33,59 @@ export function SettingsPage() {
   const [activeTab, setActiveTab] = useState<Tab>('profile');
   const [showLMSModal, setShowLMSModal] = useState(false);
 
+  // Profile form state
+  const [profileForm, setProfileForm] = useState({
+    name: student?.name || student?.fullName || '',
+    email: student?.email || '',
+  });
+  const [profileMsg, setProfileMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [profileSaving, setProfileSaving] = useState(false);
+
+  useEffect(() => {
+    setProfileForm({
+      name: student?.name || student?.fullName || '',
+      email: student?.email || '',
+    });
+  }, [student?.name, student?.fullName, student?.email]);
+
   // Password change state
   const [pwForm, setPwForm] = useState({ current: '', newPw: '', confirm: '' });
   const [pwError, setPwError] = useState('');
   const [pwSuccess, setPwSuccess] = useState(false);
   const [pwLoading, setPwLoading] = useState(false);
 
+  const handleProfileSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setProfileMsg(null);
+    setProfileSaving(true);
+    try {
+      await authApi.updateProfile({
+        name: profileForm.name.trim(),
+        email: profileForm.email.trim(),
+      });
+      await refreshStudent();
+      setProfileMsg({ ok: true, text: 'Profile updated successfully.' });
+    } catch (err: unknown) {
+      const e2 = err as { response?: { data?: { error?: string } }; message?: string };
+      setProfileMsg({
+        ok: false,
+        text: e2.response?.data?.error || e2.message || 'Unable to update profile.',
+      });
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
     setPwError('');
+    setPwSuccess(false);
     if (pwForm.newPw !== pwForm.confirm) {
-      setPwError('Passwords do not match');
+      setPwError('Passwords do not match.');
+      return;
+    }
+    if (pwForm.newPw.length < 8) {
+      setPwError('CampusSarthi password must be at least 8 characters.');
       return;
     }
     setPwLoading(true);
@@ -51,34 +94,37 @@ export function SettingsPage() {
       setPwSuccess(true);
       setPwForm({ current: '', newPw: '', confirm: '' });
     } catch (err: unknown) {
-      const e = err as { response?: { data?: { message?: string } } };
-      setPwError(e.response?.data?.message || 'Password change failed');
+      const e2 = err as { response?: { data?: { error?: string; message?: string } } };
+      setPwError(e2.response?.data?.error || e2.response?.data?.message || 'Password update failed.');
     } finally {
       setPwLoading(false);
     }
   };
 
-  const handleLogoutAll = async () => {
-    await logout();
+  const handleLogout = async (disconnectLms: boolean) => {
+    await logout(disconnectLms);
     navigate('/login');
   };
 
+  const needsCurrentPw = student?.authMode === 'campus';
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <TopBar title="Settings" />
-      <main className="flex-1 overflow-y-auto p-6">
-        <div className="flex gap-6">
+      <TopBar title="Settings" subtitle="Manage your profile, university session, and preferences" />
+      <main className="flex-1 overflow-y-auto p-4 sm:p-6">
+        <div className="flex flex-col md:flex-row gap-6 max-w-4xl">
           {/* Sidebar tabs */}
-          <nav className="w-44 flex-shrink-0 space-y-0.5">
+          <nav className="flex md:flex-col gap-1 overflow-x-auto md:w-48 shrink-0">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
+                type="button"
                 onClick={() => setActiveTab(tab.id)}
                 className={cn(
-                  'flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors text-left',
+                  'flex items-center gap-2.5 rounded-xl px-3.5 py-2 text-xs font-medium transition-all text-left whitespace-nowrap',
                   activeTab === tab.id
-                    ? 'bg-indigo-50 text-indigo-700'
-                    : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'text-slate-600 hover:bg-white/75 hover:text-slate-900'
                 )}
               >
                 {tab.icon}
@@ -88,121 +134,188 @@ export function SettingsPage() {
           </nav>
 
           {/* Content */}
-          <div className="flex-1 max-w-xl space-y-5">
-            {/* Profile Tab */}
+          <div className="flex-1 space-y-5">
             {activeTab === 'profile' && (
               <Card>
-                <CardHeader><h2 className="text-sm font-semibold text-gray-900">Profile</h2></CardHeader>
-                <CardBody className="space-y-4">
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 mb-1">Name</p>
-                    <p className="text-sm text-gray-900">{student?.name || '—'}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 mb-1">Email</p>
-                    <p className="text-sm text-gray-900">{student?.email}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 mb-1">Admission Number</p>
-                    <p className="text-sm text-gray-900">{student?.admissionNumber}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 mb-1">Account Created</p>
-                    <p className="text-sm text-gray-900">
-                      {student?.createdAt ? new Date(student.createdAt).toLocaleDateString() : '—'}
-                    </p>
-                  </div>
+                <CardHeader className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-slate-900">Student Profile</h2>
+                  <Badge variant={student?.isDemo ? 'warning' : 'info'}>
+                    {student?.isDemo
+                      ? 'Demo Account'
+                      : student?.authMode === 'campus'
+                      ? 'CampusSarthi Auth'
+                      : 'Galgotias LMS Auth'}
+                  </Badge>
+                </CardHeader>
+                <CardBody>
+                  <form onSubmit={handleProfileSave} className="space-y-4">
+                    <Input
+                      label="Full Name"
+                      value={profileForm.name}
+                      onChange={(e) => setProfileForm((p) => ({ ...p, name: e.target.value }))}
+                      disabled={Boolean(student?.isDemo)}
+                    />
+                    <Input
+                      label="Email Address"
+                      type="email"
+                      value={profileForm.email}
+                      onChange={(e) => setProfileForm((p) => ({ ...p, email: e.target.value }))}
+                      disabled={Boolean(student?.isDemo)}
+                      required
+                    />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+                      <div>
+                        <p className="text-xs font-medium text-slate-500 mb-1">Admission Number</p>
+                        <p className="text-sm font-mono text-slate-900">{student?.admissionNumber}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium text-slate-500 mb-1">Member Since</p>
+                        <p className="text-sm text-slate-900">
+                          {student?.createdAt ? new Date(student.createdAt).toLocaleDateString() : '—'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {profileMsg && (
+                      <div
+                        className={`flex items-center gap-2 text-xs ${
+                          profileMsg.ok ? 'text-emerald-700' : 'text-rose-600'
+                        }`}
+                      >
+                        {profileMsg.ok ? (
+                          <CheckCircle2 className="h-4 w-4 shrink-0" />
+                        ) : (
+                          <AlertCircle className="h-4 w-4 shrink-0" />
+                        )}
+                        <span>{profileMsg.text}</span>
+                      </div>
+                    )}
+
+                    {!student?.isDemo && (
+                      <Button type="submit" size="sm" isLoading={profileSaving}>
+                        Save Changes
+                      </Button>
+                    )}
+                  </form>
                 </CardBody>
               </Card>
             )}
 
-            {/* LMS Tab */}
             {activeTab === 'lms' && (
               <Card>
-                <CardHeader><h2 className="text-sm font-semibold text-gray-900">LMS Account</h2></CardHeader>
+                <CardHeader>
+                  <h2 className="text-sm font-semibold text-slate-900">Galgotias LMS Connection</h2>
+                </CardHeader>
                 <CardBody className="space-y-4">
                   <StatusIndicator
                     status={student?.lmsConnected ? 'connected' : 'disconnected'}
-                    label={student?.lmsConnected ? `Connected as ${student.lmsUsername || 'unknown'}` : 'Not connected'}
+                    label={
+                      student?.lmsConnected
+                        ? `Authenticated as ${student.lmsUsername || student.admissionNumber}`
+                        : 'No active university session'
+                    }
                   />
-                  {student?.lastSync && (
-                    <p className="text-xs text-gray-500">
-                      Last synced: {new Date(student.lastSync).toLocaleString()}
-                    </p>
-                  )}
+                  <div className="text-xs text-slate-500 space-y-1">
+                    {student?.lastSync && (
+                      <p>Last synchronized: {new Date(student.lastSync).toLocaleString()}</p>
+                    )}
+                    {student?.lmsExpiresAt && (
+                      <p>Session expires: {new Date(student.lmsExpiresAt).toLocaleDateString()}</p>
+                    )}
+                  </div>
                   <Button
                     size="sm"
                     variant={student?.lmsConnected ? 'outline' : 'default'}
-                    onClick={() => { getLMSStatus(); setShowLMSModal(true); }}
+                    disabled={Boolean(student?.isDemo)}
+                    onClick={() => {
+                      getLMSStatus();
+                      setShowLMSModal(true);
+                    }}
                   >
-                    {student?.lmsConnected ? 'Manage Connection' : 'Connect LMS'}
+                    {student?.lmsConnected ? 'Manage / Reauthenticate Session' : 'Connect Galgotias LMS'}
                   </Button>
                 </CardBody>
               </Card>
             )}
 
-            {/* Email Tab */}
             {activeTab === 'email' && (
               <Card>
-                <CardHeader><h2 className="text-sm font-semibold text-gray-900">Email</h2></CardHeader>
+                <CardHeader>
+                  <h2 className="text-sm font-semibold text-slate-900">Notification Email</h2>
+                </CardHeader>
                 <CardBody className="space-y-3">
                   <div>
-                    <p className="text-xs font-medium text-gray-500 mb-1">Email Address</p>
-                    <p className="text-sm text-gray-900">{student?.email}</p>
+                    <p className="text-xs font-medium text-slate-500 mb-1">Registered Email</p>
+                    <p className="text-sm font-medium text-slate-900">{student?.email}</p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <StatusIndicator
-                      status={student?.emailVerified ? 'connected' : 'warning'}
-                      label={student?.emailVerified ? 'Verified' : 'Not verified'}
-                    />
-                  </div>
-                  <p className="text-xs text-gray-500">
-                    Generated documents and analysis results are sent to this address.
+                  <StatusIndicator
+                    status={student?.isEmailVerified || student?.emailVerified ? 'connected' : 'warning'}
+                    label={
+                      student?.isEmailVerified || student?.emailVerified
+                        ? 'Email verified'
+                        : 'Verification pending'
+                    }
+                  />
+                  <p className="text-xs text-slate-500">
+                    Generated PDF drafts and deadline summaries are dispatched to this email address. Test SMTP health on the Integrations page.
                   </p>
                 </CardBody>
               </Card>
             )}
 
-            {/* AI Tab */}
             {activeTab === 'ai' && (
               <Card>
-                <CardHeader><h2 className="text-sm font-semibold text-gray-900">AI Model</h2></CardHeader>
+                <CardHeader>
+                  <h2 className="text-sm font-semibold text-slate-900">AI Document Pipeline</h2>
+                </CardHeader>
                 <CardBody className="space-y-3">
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 mb-1">Active Provider</p>
-                    <p className="text-sm text-gray-900">Google Gemini</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 mb-1">Usage</p>
-                    <p className="text-sm text-gray-900">Assignment analysis, question extraction, document generation</p>
-                  </div>
-                  <p className="text-xs text-gray-400">
-                    AI provider configuration is managed by your administrator.
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    CampusSarthi extracts questions from assignment attachments (PDF/DOCX) and builds structured revision drafts using Gemini and OpenAI. University credentials are never shared with AI models.
                   </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => navigate('/dashboard/integrations')}
+                  >
+                    Inspect Live AI Provider Status
+                  </Button>
                 </CardBody>
               </Card>
             )}
 
-            {/* Security Tab */}
             {activeTab === 'security' && (
               <div className="space-y-5">
                 <Card>
-                  <CardHeader><h2 className="text-sm font-semibold text-gray-900">Change Password</h2></CardHeader>
+                  <CardHeader>
+                    <h2 className="text-sm font-semibold text-slate-900">
+                      {needsCurrentPw
+                        ? 'Change CampusSarthi Password'
+                        : 'Set Independent CampusSarthi Password'}
+                    </h2>
+                  </CardHeader>
                   <CardBody>
-                    <form onSubmit={handlePasswordChange} className="space-y-4">
+                    <p className="text-xs text-slate-500 mb-4">
+                      Optional separate password for signing into CampusSarthi without changing your official Galgotias LMS password.
+                    </p>
+                    <form onSubmit={handlePasswordChange} className="space-y-3.5">
+                      {needsCurrentPw && (
+                        <Input
+                          label="Current CampusSarthi Password"
+                          type="password"
+                          value={pwForm.current}
+                          onChange={(e) => setPwForm((p) => ({ ...p, current: e.target.value }))}
+                          required
+                          disabled={Boolean(student?.isDemo)}
+                        />
+                      )}
                       <Input
-                        label="Current Password"
-                        type="password"
-                        value={pwForm.current}
-                        onChange={(e) => setPwForm((p) => ({ ...p, current: e.target.value }))}
-                        required
-                      />
-                      <Input
-                        label="New Password"
+                        label="New App Password"
                         type="password"
                         value={pwForm.newPw}
                         onChange={(e) => setPwForm((p) => ({ ...p, newPw: e.target.value }))}
                         required
+                        minLength={8}
+                        disabled={Boolean(student?.isDemo)}
                       />
                       <Input
                         label="Confirm New Password"
@@ -210,33 +323,44 @@ export function SettingsPage() {
                         value={pwForm.confirm}
                         onChange={(e) => setPwForm((p) => ({ ...p, confirm: e.target.value }))}
                         required
+                        minLength={8}
+                        disabled={Boolean(student?.isDemo)}
                       />
-                      {pwError && (
-                        <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                          {pwError}
-                        </p>
-                      )}
+                      {pwError && <p className="text-xs text-rose-600">{pwError}</p>}
                       {pwSuccess && (
-                        <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
-                          Password changed successfully.
+                        <p className="text-xs text-emerald-700">
+                          CampusSarthi password updated successfully.
                         </p>
                       )}
-                      <Button type="submit" size="sm" isLoading={pwLoading}>
-                        Update Password
+                      <Button
+                        type="submit"
+                        size="sm"
+                        isLoading={pwLoading}
+                        disabled={Boolean(student?.isDemo)}
+                      >
+                        Update App Password
                       </Button>
                     </form>
                   </CardBody>
                 </Card>
 
                 <Card>
-                  <CardHeader><h2 className="text-sm font-semibold text-gray-900">Sessions</h2></CardHeader>
-                  <CardBody>
-                    <p className="text-sm text-gray-600 mb-4">
-                      Logging out will end your current session and redirect you to the login page.
-                    </p>
-                    <Button variant="destructive" size="sm" onClick={handleLogoutAll}>
-                      Log Out
+                  <CardHeader>
+                    <h2 className="text-sm font-semibold text-slate-900">Session Controls</h2>
+                  </CardHeader>
+                  <CardBody className="flex flex-wrap gap-2.5">
+                    <Button variant="outline" size="sm" onClick={() => handleLogout(false)}>
+                      Sign Out
                     </Button>
+                    {!student?.isDemo && (
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => handleLogout(true)}
+                      >
+                        Sign Out & Disconnect LMS
+                      </Button>
+                    )}
                   </CardBody>
                 </Card>
               </div>
@@ -249,10 +373,13 @@ export function SettingsPage() {
         isOpen={showLMSModal}
         onClose={() => setShowLMSModal(false)}
         currentStatus={status}
-        onSuccess={refreshStudent}
+        onSuccess={() => {
+          getLMSStatus();
+          refreshStudent();
+        }}
       />
     </div>
   );
 }
 
-export default SettingsPage
+export default SettingsPage;

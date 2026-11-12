@@ -4,7 +4,21 @@
 
 // ─── Enums & Union Types ────────────────────────────────────
 
-export type AITaskStatus = 'pending' | 'processing' | 'completed' | 'failed';
+export type AITaskStatus =
+  | 'pending'
+  | 'discovering_attachments'
+  | 'downloading'
+  | 'download_failed'
+  | 'validating_document'
+  | 'extracting'
+  | 'extraction_failed'
+  | 'extracted'
+  | 'generating_solution'
+  | 'verifying_solution'
+  | 'generating_pdf'
+  | 'processing'
+  | 'completed'
+  | 'failed';
 
 export type EmailStatus = 'pending' | 'sent' | 'failed' | 'bounced';
 
@@ -148,8 +162,21 @@ export interface SyncRecord {
 
 // ─── LMS Connector Internal Types ────────────────────────────
 
+export type LMSAuthStatus =
+  | 'authenticated'
+  | 'invalid_credentials'
+  | 'requires_verification'
+  | 'account_disabled'
+  | 'lms_unavailable'
+  | 'page_changed'
+  | 'error';
+
 export interface LoginResult {
   success: boolean;
+  status?: LMSAuthStatus;
+  verificationType?: 'captcha' | 'otp' | 'mfa' | 'policy';
+  studentName?: string;
+  lmsUserId?: string;
   errorMessage?: string;
   sessionCookies?: SessionCookie[];
 }
@@ -233,6 +260,10 @@ export interface AIOptions {
   temperature?: number;
   maxOutputTokens?: number;
   systemInstruction?: string;
+  inlineAttachments?: Array<{
+    mimeType: string;
+    dataBase64: string;
+  }>;
 }
 
 // ─── PDF Types ───────────────────────────────────────────────
@@ -241,11 +272,20 @@ export interface SolutionPdfData {
   assignmentTitle: string;
   courseName: string;
   studentName: string;
+  admissionNumber?: string;
   dueDate: Date | null;
+  sourceFilename?: string;
+  sourcePageCount?: number | null;
+  summary?: string;
+  aiProviderUsed?: string;
+  verificationNotes?: string;
   questions: Array<{
+    numberLabel?: string;
+    sourcePage?: number | null;
     question: string;
     answer: string;
     reasoning?: string;
+    verificationNote?: string;
   }>;
   aiDisclaimer: string;
   generatedAt: Date;
@@ -253,8 +293,11 @@ export interface SolutionPdfData {
 
 // ─── API Request / Response Types ────────────────────────────
 
+export type AuthMode = 'lms' | 'campus' | 'demo';
+
 // Auth
 export interface RegisterRequest {
+  name?: string;
   admissionNumber: string;
   email: string;
   password: string;
@@ -262,15 +305,26 @@ export interface RegisterRequest {
 }
 
 export interface LoginRequest {
-  email: string;
+  identifier?: string;
+  admissionNumber?: string;
+  email?: string;
   password: string;
+  rememberMe?: boolean;
+  mode?: 'lms' | 'campus';
 }
 
 export interface StudentPublic {
   id: string;
   admissionNumber: string;
   email: string;
+  name?: string | null;
+  fullName?: string | null;
   isEmailVerified: boolean;
+  isDemo: boolean;
+  authMode?: AuthMode;
+  lmsConnected?: boolean;
+  lmsUsername?: string | null;
+  lastSync?: string | null;
   createdAt: Date;
 }
 
@@ -335,6 +389,8 @@ declare global {
       student?: {
         id: string;
         email: string;
+        isDemo?: boolean;
+        authMode?: AuthMode;
       };
     }
   }

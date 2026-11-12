@@ -1,24 +1,33 @@
-import type { DocumentRow } from '../types/db';
 // ============================================================
-// CampusSarthi — Assignment Routes
+// CampusSarthi — Assignment & Document Extraction Routes
 // GET  /api/v1/assignments
 // GET  /api/v1/assignments/:id
-// POST /api/v1/assignments/:id/analyze
+// POST /api/v1/assignments/:id/extract
+// POST /api/v1/assignments/:id/generate-solution
+// POST /api/v1/assignments/:id/analyze (full pipeline trigger)
+// POST /api/v1/assignments/solve-all
+// GET  /api/v1/assignments/:id/original-document
 // GET  /api/v1/assignments/:id/document
+// POST /api/v1/assignments/:id/upload-document
 // ============================================================
 
 import { Router, Request, Response } from 'express';
 import requireAuth from '../middleware/auth';
-import { Assignments, Courses, Documents as DocStore, EmailLogs, ActivityLogs } from '../db/queries';
+import {
+  Assignments,
+  Courses,
+  Documents as DocStore,
+  EmailLogs,
+} from '../db/queries';
 import { logger } from '../utils/logger';
-import { aiRouter } from '../services/ai/router';
-import { PdfExtractor } from '../services/pdf/extractor';
-import { PdfGenerator } from '../services/pdf/generator';
-import { LMSConnector } from '../services/lms/connector';
-import { LMSSessions } from '../db/queries';
-import { decrypt } from '../utils/crypto';
-import path from 'path';
-import fs from 'fs';
+import { LMSSessionExpiredError } from '../services/lms/connector';
+import {
+  runAssignmentExtraction,
+  runAssignmentSolutionGeneration,
+  getEnrichedAssignmentState,
+} from '../services/assignments/pipeline';
+import { readStoredFileBuffer, sanitizeStorageSegment } from '../services/storage/documentStorage';
+import { validateDocumentBuffer } from '../services/pdf/validator';
 import {
   isDemoStudent,
   DEMO_ASSIGNMENTS,
@@ -35,41 +44,50 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
     const studentId = req.student!.id;
     const { status, page = 1, limit = 20 } = req.query;
 
-    const assignments = await Assignments.findByStudentId(studentId, {
-      aiStatus: status as string | undefined,
-      page: Number(page),
-      limit: Number(limit),
-    });
+    const [assignments, courses] = await Promise.all([
+      Assignments.findByStudentId(studentId, {
+        aiStatus: status as string | undefined,
+        page: Number(page),
+        limit: Number(limit),
+      }),
+      Courses.findByStudentId(studentId),
+    ]);
 
-    const courses = await Courses.findByStudentId(studentId);
     const courseMap = new Map(courses.map((c) => [c.id, c]));
 
-    // If real assignments exist for this student, return them!
     if (assignments.data.length > 0) {
+      const enriched = await Promise.all(
+        assignments.data.map(async (a) => {
+          const pipeline = await getEnrichedAssignmentState(studentId, a);
+          return {
+            _id: a.id,
+            id: a.id,
+            lmsAssignmentId: a.lms_assignment_id,
+            courseId: a.course_id,
+            courseName: courseMap.get(a.course_id)?.name ?? 'Course',
+            course: { id: a.course_id, name: courseMap.get(a.course_id)?.name ?? 'Course' },
+            title: a.title,
+            description: a.description,
+            dueDate: a.due_date,
+            openDate: a.open_date,
+            maxGrade: a.max_grade,
+            submissionStatus: a.submission_status,
+            attachments: a.attachments ?? [],
+            aiStatus: pipeline.status,
+            processingStage: pipeline.stageMessage,
+            documentId: a.document_id,
+            emailSent: Boolean(a.email_sent_at),
+            emailSentAt: a.email_sent_at,
+            emailStatus: a.email_status,
+            lastSyncedAt: a.last_synced_at,
+            createdAt: a.created_at,
+          };
+        })
+      );
+
       res.json({
         success: true,
-        data: assignments.data.map((a) => ({
-          _id: a.id,
-          id: a.id,
-          lmsAssignmentId: a.lms_assignment_id,
-          courseId: a.course_id,
-          courseName: courseMap.get(a.course_id)?.name ?? 'Course',
-          course: { id: a.course_id, name: courseMap.get(a.course_id)?.name ?? 'Course' },
-          title: a.title,
-          description: a.description,
-          dueDate: a.due_date,
-          openDate: a.open_date,
-          maxGrade: a.max_grade,
-          submissionStatus: a.submission_status,
-          attachments: a.attachments ?? [],
-          aiStatus: a.ai_status,
-          documentId: a.document_id,
-          emailSent: Boolean(a.email_sent_at),
-          emailSentAt: a.email_sent_at,
-          emailStatus: a.email_status,
-          lastSyncedAt: a.last_synced_at,
-          createdAt: a.created_at,
-        })),
+        data: enriched,
         pagination: {
           page: Number(page),
           limit: Number(limit),
@@ -94,7 +112,10 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
           lmsAssignmentId: a.lms_assignment_id,
           courseId: a.course_id,
           courseName: demoCourseMap.get(a.course_id)?.name ?? 'CS301 - Design & Analysis of Algorithms',
-          course: { id: a.course_id, name: demoCourseMap.get(a.course_id)?.name ?? 'CS301 - Design & Analysis of Algorithms' },
+          course: {
+            id: a.course_id,
+            name: demoCourseMap.get(a.course_id)?.name ?? 'CS301 - Design & Analysis of Algorithms',
+          },
           title: a.title,
           description: a.description,
           dueDate: a.due_date,
@@ -103,6 +124,7 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
           submissionStatus: a.submission_status,
           attachments: a.attachments ?? [],
           aiStatus: a.ai_status,
+          processingStage: a.ai_status === 'completed' ? 'Demo solution ready.' : 'Ready to inspect.',
           documentId: a.document_id,
           emailSent: Boolean(a.email_sent_at),
           emailSentAt: a.email_sent_at,
@@ -122,33 +144,12 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
 
     res.json({
       success: true,
-      data: assignments.data.map((a) => ({
-        _id: a.id,
-        id: a.id,
-        lmsAssignmentId: a.lms_assignment_id,
-        courseId: a.course_id,
-        courseName: courseMap.get(a.course_id)?.name ?? 'Unknown Course',
-        course: { id: a.course_id, name: courseMap.get(a.course_id)?.name ?? 'Unknown Course' },
-        title: a.title,
-        description: a.description,
-        dueDate: a.due_date,
-        openDate: a.open_date,
-        maxGrade: a.max_grade,
-        submissionStatus: a.submission_status,
-        attachments: a.attachments ?? [],
-        aiStatus: a.ai_status,
-        documentId: a.document_id,
-        emailSent: Boolean(a.email_sent_at),
-        emailSentAt: a.email_sent_at,
-        emailStatus: a.email_status,
-        lastSyncedAt: a.last_synced_at,
-        createdAt: a.created_at,
-      })),
+      data: [],
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        total: assignments.total,
-        pages: Math.ceil(assignments.total / Number(limit)),
+        total: 0,
+        pages: 0,
       },
     });
   } catch (err) {
@@ -165,7 +166,9 @@ router.get('/:id', requireAuth, async (req: Request, res: Response): Promise<voi
     const targetId = String(req.params['id']);
 
     if (isDemoStudent(studentId)) {
-      const demoAssign = DEMO_ASSIGNMENTS.find((a) => a.id === targetId || a.lms_assignment_id === targetId) ?? DEMO_ASSIGNMENTS[0]!;
+      const demoAssign =
+        DEMO_ASSIGNMENTS.find((a) => a.id === targetId || a.lms_assignment_id === targetId) ??
+        DEMO_ASSIGNMENTS[0]!;
       const demoCourse = DEMO_COURSES.find((c) => c.id === demoAssign.course_id);
       const demoDoc = DEMO_DOCUMENTS.find((d) => d.assignment_id === demoAssign.id) ?? null;
 
@@ -185,24 +188,52 @@ router.get('/:id', requireAuth, async (req: Request, res: Response): Promise<voi
           submissionStatus: demoAssign.submission_status,
           attachments: demoAssign.attachments,
           aiStatus: demoAssign.ai_status,
+          processingStage: demoAssign.ai_status === 'completed' ? 'Demo solution ready.' : 'Pending extraction.',
           aiErrorMessage: demoAssign.ai_error_message,
           aiProcessedAt: demoAssign.ai_processed_at,
+          originalDocuments: (demoAssign.attachments || []).map((att, idx) => ({
+            index: idx,
+            filename: att.filename,
+            originalUrl: att.url,
+            format: att.filename.endsWith('.pdf') ? 'pdf' : 'docx',
+            mimeType: att.mimeType || 'application/pdf',
+            sizeBytes: att.fileSize || 0,
+            pageCount: 2,
+            downloadStatus: 'validated',
+          })),
+          extractedContent: demoDoc
+            ? {
+                status: 'extracted',
+                totalPages: 2,
+                charCount: 420,
+                extractionConfidence: 'high',
+                warnings: [],
+                visualFlags: [],
+                requiresVisualProcessing: false,
+                detectedQuestions: [
+                  {
+                    id: 'q_1',
+                    numberLabel: 'Q1',
+                    questionText: demoAssign.description || 'Sample Demo Assignment Question',
+                    subquestions: [],
+                    sourcePage: 1,
+                  },
+                ],
+                extractedAt: demoDoc.generated_at,
+              }
+            : null,
           document: demoDoc
             ? {
                 id: demoDoc.id,
                 filename: demoDoc.filename,
                 fileSizeBytes: demoDoc.file_size_bytes,
                 generatedAt: demoDoc.generated_at,
+                downloadUrl: `/api/v1/documents/${demoDoc.id}/download`,
+                previewUrl: `/api/v1/documents/${demoDoc.id}/preview`,
               }
             : null,
-          emailLogs: [
-            {
-              id: 'demo_email_log_01',
-              status: 'sent',
-              sentAt: new Date(Date.now() - 3600000).toISOString(),
-              errorMessage: null,
-            },
-          ],
+          documentId: demoDoc?.id ?? null,
+          emailLogs: [],
           lastSyncedAt: demoAssign.last_synced_at,
           createdAt: demoAssign.created_at,
           updatedAt: demoAssign.updated_at,
@@ -211,21 +242,24 @@ router.get('/:id', requireAuth, async (req: Request, res: Response): Promise<voi
       return;
     }
 
-    const assignment = await Assignments.findById(String(req.params['id']));
-
-    if (!assignment || assignment.student_id !== studentId) {
+    const assignment = await Assignments.findById(targetId);
+    if (!assignment) {
       res.status(404).json({ error: 'Assignment not found.' });
       return;
     }
+    if (assignment.student_id !== studentId) {
+      res.status(403).json({ error: 'Forbidden: assignment belongs to another student.' });
+      return;
+    }
 
-    const course = await Courses.findById(assignment.course_id);
+    const [course, documents, emailLogs, pipeline] = await Promise.all([
+      Courses.findById(assignment.course_id),
+      DocStore.findByAssignmentId(assignment.id),
+      EmailLogs.findByAssignmentId(assignment.id),
+      getEnrichedAssignmentState(studentId, assignment),
+    ]);
 
-    // Get document if any
-    const documents = await DocStore.findByAssignmentId(assignment.id);
     const doc = documents[0] ?? null;
-
-    // Get email logs
-    const emailLogs = await EmailLogs.findByAssignmentId(assignment.id);
 
     res.json({
       success: true,
@@ -242,22 +276,55 @@ router.get('/:id', requireAuth, async (req: Request, res: Response): Promise<voi
         maxGrade: assignment.max_grade,
         submissionStatus: assignment.submission_status,
         attachments: assignment.attachments,
-        aiStatus: assignment.ai_status,
+        aiStatus: pipeline.status,
+        processingStage: pipeline.stageMessage,
+        requiresReauth: pipeline.requiresReauth,
         aiErrorMessage: assignment.ai_error_message,
+        errorMessage: assignment.ai_error_message,
         aiProcessedAt: assignment.ai_processed_at,
+        originalDocuments: pipeline.originalDocuments,
+        extractedContent: pipeline.extraction
+          ? {
+              status: pipeline.extraction.status,
+              documentTitle: pipeline.extraction.documentTitle,
+              totalPages: pipeline.extraction.totalPages,
+              charCount: pipeline.extraction.charCount,
+              extractionConfidence: pipeline.extraction.extractionConfidence,
+              warnings: pipeline.extraction.warnings,
+              visualFlags: pipeline.extraction.visualFlags,
+              requiresVisualProcessing: pipeline.extraction.requiresVisualProcessing,
+              instructions: pipeline.extraction.instructions,
+              rawTextPreview: pipeline.extraction.rawTextPreview,
+              detectedQuestions: pipeline.extraction.detectedQuestions,
+              extractedAt: pipeline.extraction.extractedAt,
+              error: pipeline.extraction.error,
+            }
+          : null,
+        questionsExtracted: pipeline.extraction?.detectedQuestions.map(
+          (q) => `${q.numberLabel}: ${q.questionText}`
+        ),
+        solutionMeta: pipeline.solution,
+        documentId: doc?.id ?? assignment.document_id,
         document: doc
           ? {
               id: doc.id,
               filename: doc.filename,
               fileSizeBytes: doc.file_size_bytes,
               generatedAt: doc.generated_at,
+              downloadUrl: `/api/v1/documents/${doc.id}/download`,
+              previewUrl: `/api/v1/documents/${doc.id}/preview`,
             }
           : null,
+        emailSent: Boolean(assignment.email_sent_at && assignment.email_status === 'sent'),
+        emailSentAt: assignment.email_sent_at,
+        emailStatus: assignment.email_status,
         emailLogs: emailLogs.map((l) => ({
           id: l.id,
           status: l.status,
           sentAt: l.sent_at,
+          messageId: l.message_id,
           errorMessage: l.error_message,
+          createdAt: l.created_at,
         })),
         lastSyncedAt: assignment.last_synced_at,
         createdAt: assignment.created_at,
@@ -270,7 +337,109 @@ router.get('/:id', requireAuth, async (req: Request, res: Response): Promise<voi
   }
 });
 
-// --- POST /assignments/solve-all -----------------------------
+// --- POST /assignments/:id/extract ----------------------------
+// Phase 1 only: Download -> Validate -> Store Original -> Extract Questions
+
+router.post('/:id/extract', requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const studentId = req.student!.id;
+  const assignmentId = String(req.params['id']);
+  const force = Boolean(req.body?.force);
+
+  if (isDemoStudent(studentId)) {
+    res.json({
+      success: true,
+      message: 'Demo extraction ready.',
+      data: { assignmentId, status: 'extracted' },
+    });
+    return;
+  }
+
+  try {
+    const assignment = await Assignments.findById(assignmentId);
+    if (!assignment) {
+      res.status(404).json({ error: 'Assignment not found.' });
+      return;
+    }
+    if (assignment.student_id !== studentId) {
+      res.status(403).json({ error: 'Forbidden.' });
+      return;
+    }
+
+    const state = await runAssignmentExtraction(studentId, assignment, { force });
+    res.json({
+      success: true,
+      message: state.stageMessage,
+      data: {
+        assignmentId,
+        status: state.status,
+        originalDocuments: state.originalDocuments,
+        extraction: state.extraction,
+      },
+    });
+  } catch (err) {
+    if (err instanceof LMSSessionExpiredError) {
+      res.status(401).json({
+        success: false,
+        requiresReauth: true,
+        error: err.message,
+      });
+      return;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('Assignment extraction error', { assignmentId, error: msg });
+    res.status(422).json({ success: false, error: msg });
+  }
+});
+
+// --- POST /assignments/:id/generate-solution ------------------
+// Phase 2: Generate verified solutions + A4 PDF (runs extraction first if needed)
+
+router.post('/:id/generate-solution', requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const studentId = req.student!.id;
+  const assignmentId = String(req.params['id']);
+  const forceExtract = Boolean(req.body?.forceExtract);
+
+  if (isDemoStudent(studentId)) {
+    res.json({
+      success: true,
+      message: 'Demo assignment solution completed.',
+      data: { assignmentId, status: 'completed' },
+    });
+    return;
+  }
+
+  try {
+    const assignment = await Assignments.findById(assignmentId);
+    if (!assignment) {
+      res.status(404).json({ error: 'Assignment not found.' });
+      return;
+    }
+    if (assignment.student_id !== studentId) {
+      res.status(403).json({ error: 'Forbidden.' });
+      return;
+    }
+
+    await Assignments.updateAIStatus(assignmentId, 'generating_solution', null, 'Starting verified solution pipeline…');
+
+    res.status(202).json({
+      success: true,
+      message: 'Solution generation started. Status will update automatically as stages complete.',
+      data: { assignmentId, status: 'generating_solution' },
+    });
+
+    runAssignmentSolutionGeneration(studentId, assignment, { forceExtract }).catch((err) => {
+      logger.error('Async solution generation failed', {
+        assignmentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  } catch (err) {
+    logger.error('Generate solution trigger error', { error: String(err) });
+    res.status(500).json({ error: 'Failed to start solution generation.' });
+  }
+});
+
+// --- POST /assignments/solve-all ------------------------------
 
 router.post('/solve-all', requireAuth, async (req: Request, res: Response): Promise<void> => {
   const studentId = req.student!.id;
@@ -279,7 +448,7 @@ router.post('/solve-all', requireAuth, async (req: Request, res: Response): Prom
   if (isDemoStudent(studentId)) {
     res.json({
       success: true,
-      message: 'AI solution drafting queued for all demo assignments.',
+      message: 'AI solution drafting queued for demo assignments.',
       data: { queuedCount: DEMO_ASSIGNMENTS.length },
     });
     return;
@@ -303,23 +472,21 @@ router.post('/solve-all', requireAuth, async (req: Request, res: Response): Prom
     }
 
     for (const a of targets) {
-      await Assignments.updateAIStatus(a.id, 'processing');
+      await Assignments.updateAIStatus(a.id, 'discovering_attachments', null, 'Queued for processing…');
     }
 
     res.json({
       success: true,
-      message: `Started AI solution drafting for ${targets.length} assignment${targets.length > 1 ? 's' : ''}.`,
+      message: `Started extraction & AI solution drafting for ${targets.length} assignment${targets.length > 1 ? 's' : ''}.`,
       data: { queuedCount: targets.length },
     });
 
-    // Background batch processing
     (async () => {
       for (const a of targets) {
         try {
-          await runAssignmentAnalysis(studentId, a);
+          await runAssignmentSolutionGeneration(studentId, a);
         } catch (err) {
           logger.error('Bulk assignment solution failed', { assignmentId: a.id, error: String(err) });
-          await Assignments.updateAIStatus(a.id, 'failed', String(err)).catch(() => {});
         }
       }
     })().catch(() => {});
@@ -329,7 +496,8 @@ router.post('/solve-all', requireAuth, async (req: Request, res: Response): Prom
   }
 });
 
-// --- POST /assignments/:id/analyze ---------------------------
+// --- POST /assignments/:id/analyze ----------------------------
+// Full end-to-end trigger (Extraction + Solution + PDF)
 
 router.post('/:id/analyze', requireAuth, async (req: Request, res: Response): Promise<void> => {
   const studentId = req.student!.id;
@@ -346,29 +514,33 @@ router.post('/:id/analyze', requireAuth, async (req: Request, res: Response): Pr
 
   try {
     const assignment = await Assignments.findById(assignmentId);
-    if (!assignment || assignment.student_id !== studentId) {
+    if (!assignment) {
       res.status(404).json({ error: 'Assignment not found.' });
       return;
     }
-
-    if (assignment.ai_status === 'processing') {
-      res.status(409).json({ error: 'Analysis already in progress.' });
+    if (assignment.student_id !== studentId) {
+      res.status(403).json({ error: 'Forbidden.' });
       return;
     }
 
-    // Mark as processing immediately
-    await Assignments.updateAIStatus(assignmentId, 'processing');
+    await Assignments.updateAIStatus(
+      assignmentId,
+      'discovering_attachments',
+      null,
+      'Starting document discovery & extraction…'
+    );
 
     res.json({
       success: true,
-      message: 'AI analysis started. This may take a minute.',
-      data: { assignmentId, status: 'processing' },
+      message: 'Assignment document extraction and solution generation started.',
+      data: { assignmentId, status: 'discovering_attachments' },
     });
 
-    // Run analysis asynchronously
-    runAssignmentAnalysis(studentId, assignment).catch((err) => {
-      logger.error('Assignment analysis failed', { assignmentId, error: String(err) });
-      Assignments.updateAIStatus(assignmentId, 'failed', String(err)).catch(() => {});
+    runAssignmentSolutionGeneration(studentId, assignment).catch((err) => {
+      logger.error('Assignment analyze pipeline failed', {
+        assignmentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
   } catch (err) {
     logger.error('Analyze trigger error', { error: String(err) });
@@ -376,15 +548,71 @@ router.post('/:id/analyze', requireAuth, async (req: Request, res: Response): Pr
   }
 });
 
-// --- GET /assignments/:id/document ---------------------------
+// --- GET /assignments/:id/original-document -------------------
+// Stream or download the persisted original LMS attachment
+
+router.get('/:id/original-document', requireAuth, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const studentId = req.student!.id;
+    const assignmentId = String(req.params['id']);
+    const index = Number(req.query['index'] ?? 0);
+    const asAttachment = req.query['download'] === '1' || req.query['download'] === 'true';
+
+    const assignment = await Assignments.findById(assignmentId);
+    if (!assignment) {
+      res.status(404).json({ error: 'Assignment not found.' });
+      return;
+    }
+    if (assignment.student_id !== studentId) {
+      res.status(403).json({ error: 'Forbidden.' });
+      return;
+    }
+
+    const enriched = await getEnrichedAssignmentState(studentId, assignment);
+    const target =
+      enriched.originalDocuments.find((d) => d.index === index && d.downloadStatus === 'validated') ??
+      enriched.originalDocuments.find((d) => d.downloadStatus === 'validated');
+
+    if (!target) {
+      res.status(404).json({
+        error: 'No downloaded original document found yet. Run Document Extraction first.',
+      });
+      return;
+    }
+
+    const buffer = await readStoredFileBuffer(target.localPath, target.storageKey);
+    if (!buffer || buffer.length === 0) {
+      res.status(410).json({
+        error: 'Original document is missing from persistent storage. Re-run extraction to download it from LMS.',
+      });
+      return;
+    }
+
+    const safeName = sanitizeStorageSegment(target.filename);
+    const disposition = asAttachment ? 'attachment' : 'inline';
+    res.setHeader('Content-Type', target.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `${disposition}; filename="${safeName}"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+  } catch (err) {
+    logger.error('Get original document error', { error: String(err) });
+    res.status(500).json({ error: 'Failed to stream original document.' });
+  }
+});
+
+// --- GET /assignments/:id/document ----------------------------
 
 router.get('/:id/document', requireAuth, async (req: Request, res: Response): Promise<void> => {
   try {
     const studentId = req.student!.id;
     const assignment = await Assignments.findById(String(req.params['id']));
 
-    if (!assignment || assignment.student_id !== studentId) {
+    if (!assignment) {
       res.status(404).json({ error: 'Assignment not found.' });
+      return;
+    }
+    if (assignment.student_id !== studentId) {
+      res.status(403).json({ error: 'Forbidden.' });
       return;
     }
 
@@ -403,6 +631,7 @@ router.get('/:id/document', requireAuth, async (req: Request, res: Response): Pr
         fileSizeBytes: doc.file_size_bytes,
         generatedAt: doc.generated_at,
         downloadUrl: `/api/v1/documents/${doc.id}/download`,
+        previewUrl: `/api/v1/documents/${doc.id}/preview`,
       },
     });
   } catch (err) {
@@ -411,13 +640,17 @@ router.get('/:id/document', requireAuth, async (req: Request, res: Response): Pr
   }
 });
 
-// --- POST /assignments/:id/upload-document -------------------
-// Upload official assignment question PDF or DOCX directly
+// --- POST /assignments/:id/upload-document --------------------
+
 router.post('/:id/upload-document', requireAuth, async (req: Request, res: Response): Promise<void> => {
   try {
     const studentId = req.student!.id;
     const assignmentId = String(req.params['id']);
-    const { filename, fileBase64 } = req.body as { filename?: string; fileBase64?: string };
+    const { filename, fileBase64, autoGenerate } = req.body as {
+      filename?: string;
+      fileBase64?: string;
+      autoGenerate?: boolean;
+    };
 
     if (!fileBase64 || !filename) {
       res.status(400).json({ error: 'filename and fileBase64 are required.' });
@@ -425,258 +658,55 @@ router.post('/:id/upload-document', requireAuth, async (req: Request, res: Respo
     }
 
     const assignment = await Assignments.findById(assignmentId);
-    if (!assignment || assignment.student_id !== studentId) {
+    if (!assignment) {
       res.status(404).json({ error: 'Assignment not found.' });
       return;
     }
+    if (assignment.student_id !== studentId) {
+      res.status(403).json({ error: 'Forbidden.' });
+      return;
+    }
 
-    // Save uploaded file to temp directory
-    const tmpDir = path.join(process.env['TEMP'] ?? '/tmp', 'campussarthi', 'uploads');
-    fs.mkdirSync(tmpDir, { recursive: true });
-    const cleanName = filename.replace(/[\\/:*?"<>|]/g, '_').trim();
-    const destPath = path.join(tmpDir, `${Date.now()}_${cleanName}`);
-
+    const cleanName = sanitizeStorageSegment(filename);
     const base64Data = fileBase64.replace(/^data:[^;]+;base64,/, '');
-    fs.writeFileSync(destPath, Buffer.from(base64Data, 'base64'));
+    const buffer = Buffer.from(base64Data, 'base64');
 
-    // Extract questions and text
-    const extractor = new PdfExtractor();
-    const doc = await extractor.extractDocumentText(destPath);
-    const questions = await extractor.extractQuestions(doc.text);
+    const validation = await validateDocumentBuffer(buffer, cleanName);
+    if (!validation.valid || validation.format === 'unsupported') {
+      res.status(422).json({
+        success: false,
+        error: validation.error || 'Invalid document file format.',
+      });
+      return;
+    }
 
-    // Update assignment attachments
-    const existingAtts: Array<{ url: string; filename: string; fileSize: number | null; mimeType: string | null }> =
-      Array.isArray(assignment.attachments)
-        ? assignment.attachments.map((a: any) => ({
-            url: String(a.url || ''),
-            filename: String(a.filename || ''),
-            fileSize: a.fileSize ?? null,
-            mimeType: a.mimeType ?? null,
-          }))
-        : [];
-
-    const newAtt = {
-      url: '',
-      filename: cleanName,
-      fileSize: fs.statSync(destPath).size,
-      mimeType: cleanName.endsWith('.pdf')
-        ? 'application/pdf'
-        : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    };
-
-    const combinedAtts = [
-      ...existingAtts.filter((a) => a.filename !== cleanName),
-      newAtt,
-    ];
-
-    await Assignments.upsert({
-      studentId,
-      courseId: assignment.course_id,
-      lmsAssignmentId: assignment.lms_assignment_id,
-      title: assignment.title,
-      description: assignment.description ?? undefined,
-      dueDate: assignment.due_date ? new Date(assignment.due_date) : undefined,
-      attachments: combinedAtts,
+    const extractedState = await runAssignmentExtraction(studentId, assignment, {
+      preloadedFiles: [{ filename: cleanName, buffer, mimeType: validation.mimeType }],
     });
 
-    await Assignments.updateAIStatus(assignmentId, 'processing');
+    if (autoGenerate) {
+      runAssignmentSolutionGeneration(studentId, assignment).catch((err) => {
+        logger.error('Solution generation after upload failed', { assignmentId, error: String(err) });
+      });
+    }
 
     res.json({
       success: true,
-      message: `Uploaded ${cleanName}. Extracted ${questions.length} questions. Starting AI solution drafting.`,
-      data: { assignmentId, questionsFound: questions.length },
-    });
-
-    // Run solution generation asynchronously
-    runAssignmentAnalysis(studentId, assignment, [destPath]).catch((err) => {
-      logger.error('Analysis of uploaded document failed', { assignmentId, error: String(err) });
-      Assignments.updateAIStatus(assignmentId, 'failed', String(err)).catch(() => {});
+      message: `Validated and extracted ${extractedState.extraction?.detectedQuestions.length ?? 0} question(s) from ${cleanName}.`,
+      data: {
+        assignmentId,
+        status: extractedState.status,
+        questionsFound: extractedState.extraction?.detectedQuestions.length ?? 0,
+        extraction: extractedState.extraction,
+        originalDocuments: extractedState.originalDocuments,
+      },
     });
   } catch (err) {
     logger.error('Upload document error', { error: String(err) });
-    res.status(500).json({ error: 'Failed to process uploaded assignment document.' });
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Failed to process uploaded assignment document.',
+    });
   }
 });
 
-// --- Analysis Pipeline (async) --------------------------------
-
-async function runAssignmentAnalysis(
-  studentId: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  assignment: any,
-  preloadedFiles: string[] = []
-): Promise<void> {
-  const assignmentId: string = assignment.id;
-  logger.info('Starting assignment analysis', { assignmentId, title: assignment.title });
-
-  const course = await Courses.findById(assignment.course_id);
-  const courseName = course?.name ?? 'Unknown Course';
-
-  let extractedText = '';
-  const downloadedFiles: string[] = [...preloadedFiles];
-
-  // -- Step 1: Download attachments (DOCX, PDF, etc.) -------
-  const attachments: Array<{ url: string; filename: string }> =
-    Array.isArray(assignment.attachments) ? assignment.attachments : [];
-
-  if (attachments.length > 0) {
-    const session = await LMSSessions.findActiveByStudentId(studentId);
-    if (session) {
-      const connector = new LMSConnector({ headless: true, timeout: 30000 });
-      try {
-        await connector.launch();
-        // Restore session cookies
-        const cookies = JSON.parse(decrypt(String(session['session_data_encrypted'] ?? '')));
-        await connector.restoreSession(cookies);
-
-        for (const att of attachments) {
-          if (att.url) {
-            try {
-              const tmpDir = path.join(process.env['TEMP'] ?? '/tmp', 'campussarthi', 'downloads');
-              fs.mkdirSync(tmpDir, { recursive: true });
-              // Sanitize filename to avoid filesystem errors on Windows (colons, slashes)
-              const safeFilename = (att.filename || 'assignment_document')
-                .replace(/[\\/:*?"<>|]/g, '_')
-                .replace(/\s+/g, ' ')
-                .trim();
-              const destPath = path.join(tmpDir, `${Date.now()}_${safeFilename}`);
-              await connector.downloadFile(att.url, destPath);
-              downloadedFiles.push(destPath);
-            } catch (dlErr) {
-              logger.warn('File download failed', { url: att.url, error: String(dlErr) });
-            }
-          }
-        }
-      } finally {
-        await connector.close().catch(() => {});
-      }
-    }
-  }
-
-  // -- Step 2: Extract text and questions from documents -----
-  const extractor = new PdfExtractor();
-  const allExtractedQuestions: string[] = [];
-
-  for (const filePath of downloadedFiles) {
-    try {
-      const doc = await extractor.extractDocumentText(filePath);
-      if (doc.text && doc.text.trim()) {
-        extractedText += `\n\n--- Content from ${path.basename(filePath)} ---\n${doc.text.trim()}`;
-        const questionsInDoc = await extractor.extractQuestions(doc.text);
-        for (const q of questionsInDoc) {
-          if (!allExtractedQuestions.includes(q)) {
-            allExtractedQuestions.push(q);
-          }
-        }
-      } else {
-        extractedText += `\n\n--- Attached Document: ${path.basename(filePath)} ---\n[Document file ${path.basename(filePath)} attached by instructor]`;
-      }
-    } catch (extractErr) {
-      logger.warn('Document extraction failed', { filePath, error: String(extractErr) });
-    }
-  }
-
-  // Also extract questions from assignment description if present
-  if (assignment.description) {
-    const descQuestions = await extractor.extractQuestions(assignment.description);
-    for (const q of descQuestions) {
-      if (!allExtractedQuestions.includes(q)) {
-        allExtractedQuestions.push(q);
-      }
-    }
-  }
-
-  // -- Step 3: Build prompt -----------------------------------
-  const assignmentContext = `
-Assignment Title: ${assignment.title}
-Course: ${courseName}
-Due Date: ${assignment.due_date ? new Date(assignment.due_date).toLocaleDateString() : 'Not specified'}
-Description: ${assignment.description ?? 'No description provided'}
-${allExtractedQuestions.length > 0 ? `\nExtracted Assignment Questions (${allExtractedQuestions.length} identified):\n${allExtractedQuestions.map((q, idx) => `Q${idx + 1}: ${q}`).join('\n')}` : ''}
-${extractedText ? `\nAttached Document Content:\n${extractedText}` : ''}
-`.trim();
-
-  const analysisPrompt = `You are an academic assistant helping a university student solve and understand their assignment.
-
-ASSIGNMENT DETAILS:
-${assignmentContext}
-
-Please:
-1. Address every question identified from the assignment and attached document (${allExtractedQuestions.length > 0 ? `${allExtractedQuestions.length} questions` : 'all questions found in text'}).
-2. For each question, provide:
-   - "question": The exact question or task statement
-   - "reasoning": The governing academic principles, theory, formulas, and method of solution
-   - "answer": Complete step-by-step solved derivation, calculated answers with units, and clear conclusions
-3. Format your response strictly as valid JSON with this structure:
-{
-  "questions": [
-    {
-      "question": "The question text",
-      "answer": "Detailed step-by-step solution",
-      "reasoning": "Relevant formulas, theory, and approach"
-    }
-  ],
-  "summary": "Brief summary of the topics covered in this assignment and key takeaways for exam review"
-}
-
-IMPORTANT: This is an academic study guide to help the student understand and verify their coursework.`;
-
-  // -- Step 4: Call AI router --------------------------------
-  interface AnalysisResult {
-    questions: Array<{ question: string; answer: string; reasoning?: string }>;
-    summary: string;
-  }
-
-  const analysisResult = await aiRouter.analyzeWithStructuredOutput<AnalysisResult>(
-    'solution_generation',
-    analysisPrompt,
-    '{"questions": [{"question": "string", "answer": "string", "reasoning": "string (optional)"}], "summary": "string"}'
-  );
-
-  // -- Step 5: Generate PDF -----------------------------------
-  const pdfGenerator = new PdfGenerator();
-  const pdfPath = await pdfGenerator.generateSolutionPdf({
-    assignmentTitle: assignment.title,
-    courseName,
-    studentName: 'Student',
-    dueDate: assignment.due_date ? new Date(assignment.due_date) : null,
-    questions: analysisResult.questions,
-    aiDisclaimer:
-      'AI-PREPARED DRAFT — FOR STUDENT REVIEW ONLY. Review all answers carefully before any use. Do not submit without reading and verifying.',
-    generatedAt: new Date(),
-  });
-
-  // -- Step 6: Save document record --------------------------
-  const stats = fs.statSync(pdfPath);
-  const doc = await DocStore.create({
-    studentId,
-    assignmentId,
-    filename: path.basename(pdfPath),
-    filePath: pdfPath,
-    fileSizeBytes: stats.size,
-  });
-
-  await Assignments.updatePdfDocument(assignmentId, doc.id);
-  await Assignments.updateAIStatus(assignmentId, 'completed');
-
-  await ActivityLogs.create({
-    studentId,
-    type: 'document_generated',
-    description: `AI solution generated for: ${assignment.title}`,
-    metadata: { assignmentId, documentId: doc.id, questionsCount: analysisResult.questions.length },
-  });
-
-  // -- Cleanup downloaded files -------------------------------
-  for (const f of downloadedFiles) {
-    fs.unlink(f, () => {});
-  }
-
-  logger.info('Assignment analysis completed', {
-    assignmentId,
-    documentId: doc.id,
-    questionsFound: analysisResult.questions.length,
-  });
-}
-
 export default router;
-export { runAssignmentAnalysis };
