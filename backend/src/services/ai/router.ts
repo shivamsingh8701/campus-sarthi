@@ -84,23 +84,85 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-function parseJsonSafe<T>(rawText: string, providerName: string): T {
-  let cleaned = rawText.trim();
+function cleanJsonString(str: string): string {
+  let cleaned = str.trim();
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```$/i, '').trim();
   }
-  // Extract first JSON object if wrapped in stray commentary
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     cleaned = cleaned.slice(firstBrace, lastBrace + 1);
   }
+  return cleaned;
+}
+
+function repairJsonString(input: string): string {
+  let s = input;
+
+  // Remove trailing commas before closing braces or brackets: , } -> } and , ] -> ]
+  s = s.replace(/,\s*([}\]])/g, '$1');
+
+  // If the model truncated mid-generation, attempt to close open brackets/braces
+  let openBraces = 0;
+  let openBrackets = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (c === '\\') {
+      escape = true;
+      continue;
+    }
+    if (c === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (c === '{') openBraces++;
+      else if (c === '}') openBraces = Math.max(0, openBraces - 1);
+      else if (c === '[') openBrackets++;
+      else if (c === ']') openBrackets = Math.max(0, openBrackets - 1);
+    }
+  }
+
+  // If truncated inside a string, close the quote
+  if (inString) {
+    s += '"';
+  }
+
+  // Close unclosed brackets and braces
+  while (openBrackets > 0) {
+    s += ']';
+    openBrackets--;
+  }
+  while (openBraces > 0) {
+    s += '}';
+    openBraces--;
+  }
+
+  return s;
+}
+
+function parseJsonSafe<T>(rawText: string, providerName: string): T {
+  const cleaned = cleanJsonString(rawText);
   try {
     return JSON.parse(cleaned) as T;
-  } catch (err) {
-    throw new Error(
-      `AI response from ${providerName} was not valid JSON (${err instanceof Error ? err.message : String(err)}). Sample: ${cleaned.slice(0, 220)}`
-    );
+  } catch (initialErr) {
+    // Attempt relaxed repair (stripping trailing commas, closing unclosed brackets/strings)
+    try {
+      const repaired = repairJsonString(cleaned);
+      return JSON.parse(repaired) as T;
+    } catch {
+      throw new Error(
+        `AI response from ${providerName} was not valid JSON (${initialErr instanceof Error ? initialErr.message : String(initialErr)}). Sample: ${cleaned.slice(0, 220)}`
+      );
+    }
   }
 }
 
@@ -118,12 +180,14 @@ async function callGemini(
   if (!cfg.ai.geminiApiKey) throw new Error('GEMINI_API_KEY is not configured');
 
   const genAI = new GoogleGenerativeAI(cfg.ai.geminiApiKey);
+  const isJsonExpected = prompt.includes('Return ONLY valid JSON') || prompt.includes('"questions": [');
   const generativeModel = genAI.getGenerativeModel({
     model,
     systemInstruction: options.systemInstruction,
     generationConfig: {
       temperature: options.temperature ?? 0.35,
       maxOutputTokens: options.maxOutputTokens ?? 8192,
+      ...(isJsonExpected ? { responseMimeType: 'application/json' } : {}),
     },
   });
 
